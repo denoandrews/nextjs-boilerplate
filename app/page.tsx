@@ -29,7 +29,10 @@ export default function Home() {
         body: JSON.stringify({ message: text }),
       });
 
-      const data = (await res.json()) as { reply?: string };
+      const data = (await res.json()) as {
+  reply?: string;
+  citations?: { file_id: string; filename: string }[];
+};
 
       const replyMsg: Msg = {
         role: "assistant",
