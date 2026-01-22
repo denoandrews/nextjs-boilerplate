@@ -34,10 +34,15 @@ export default function Home() {
   citations?: { file_id: string; filename: string }[];
 };
 
-      const replyMsg: Msg = {
-        role: "assistant",
-        text: data.reply ?? "No reply.",
-      };
+const sources =
+  data.citations && data.citations.length
+    ? "\n\nSources:\n" + data.citations.map((c) => `• ${c.filename}`).join("\n")
+    : "";
+
+const replyMsg: Msg = {
+  role: "assistant",
+  text: (data.reply ?? "No reply.") + sources,
+};
 
       setMessages([...next, replyMsg]);
     } catch {
