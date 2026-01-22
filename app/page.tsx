@@ -1,7 +1,9 @@
 "use client";
+
 import { useState } from "react";
 
-type Msg = { role: "user" | "assistant"; text: string };
+type Role = "user" | "assistant";
+type Msg = { role: Role; text: string };
 
 export default function Home() {
   const [messages, setMessages] = useState<Msg[]>([
@@ -17,7 +19,7 @@ export default function Home() {
     setBusy(true);
     setInput("");
 
-    const next = [...messages, { role: "user", text }];
+    const next: Msg[] = [...messages, { role: "user" as Role, text }];
     setMessages(next);
 
     try {
@@ -28,7 +30,13 @@ export default function Home() {
       });
 
       const data = (await res.json()) as { reply?: string };
-      setMessages([...next, { role: "assistant", text: data.reply ?? "No reply." }]);
+
+      const replyMsg: Msg = {
+        role: "assistant",
+        text: data.reply ?? "No reply.",
+      };
+
+      setMessages([...next, replyMsg]);
     } catch {
       setMessages([...next, { role: "assistant", text: "Error calling /api/chat" }]);
     } finally {
