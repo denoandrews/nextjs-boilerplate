@@ -113,19 +113,15 @@ Sources:
         { role: "user", content: message },
       ],
       tools: [
-        {
-          type: "file_search",
-          vector_store_ids: [process.env.VECTOR_STORE_ID],
-          max_num_results: 8,
-        },
-        {
-          type: "web_search",
-          filters: {
-            allowed_domains: ["oak-park.us"],
-          },
-        },
-      ],
-      include: ["file_search_call.results", "web_search_call.action.sources"],
+  {
+    type: "file_search",
+    vector_store_ids: [process.env.VECTOR_STORE_ID],
+    max_num_results: 8,
+  },
+  {
+    type: "web_search_preview",
+  },
+],
     });
 
     const { answer, citations, webSources } = extractAnswerAndCitations(response);
