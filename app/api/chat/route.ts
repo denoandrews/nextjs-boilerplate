@@ -8,13 +8,24 @@ const client = new OpenAI({
 
 function extractAnswerAndCitations(response: any) {
   const output = Array.isArray(response?.output) ? response.output : [];
-
   let answer = response?.output_text ?? "";
 
   const citations: { file_id: string; filename: string }[] = [];
+  const webSources: { title?: string; url?: string }[] = [];
 
   for (const item of output) {
+    // Web search call outputs can appear as tool calls in the output array
+    if (item?.type === "web_search_call") {
+      const sources = item?.action?.sources;
+      if (Array.isArray(sources)) {
+        for (const s of sources) {
+          webSources.push({ title: s?.title, url: s?.url });
+        }
+      }
+    }
+
     if (item?.type !== "message") continue;
+
     const content = Array.isArray(item?.content) ? item.content : [];
     for (const part of content) {
       if (part?.type !== "output_text") continue;
@@ -35,16 +46,26 @@ function extractAnswerAndCitations(response: any) {
     }
   }
 
-  // Deduplicate by file id and filename
-  const seen = new Set<string>();
-  const unique = citations.filter((c) => {
+  // Deduplicate citations
+  const seenFiles = new Set<string>();
+  const uniqueCitations = citations.filter((c) => {
     const key = `${c.file_id}:${c.filename}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
+    if (seenFiles.has(key)) return false;
+    seenFiles.add(key);
     return true;
   });
 
-  return { answer: (answer || "").trim(), citations: unique };
+  // Deduplicate web sources
+  const seenUrls = new Set<string>();
+  const uniqueWebSources = webSources.filter((s) => {
+    const url = s.url ?? "";
+    if (!url) return false;
+    if (seenUrls.has(url)) return false;
+    seenUrls.add(url);
+    return true;
+  });
+
+  return { answer: (answer || "").trim(), citations: uniqueCitations, webSources: uniqueWebSources };
 }
 
 export async function POST(req: Request) {
@@ -62,58 +83,71 @@ export async function POST(req: Request) {
       return Response.json({ reply: "Type a question and press Send." });
     }
 
-   const response = await client.responses.create({
-  model: "gpt-4.1-mini",
-  input: [
-    {
-      role: "system",
-      content: `
-You are MuniGPT, an informational assistant for municipal governments.
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: `
+You are MuniGPT, an informational assistant for the Village of Oak Park.
 
-Rules you must follow:
-1. Use the provided municipal documents retrieved via file search. If the answer is not in the document library, use web search restricted to http://oak-park.us. 
-2. If the documents do not contain enough information to answer, say:
-   "I do not have enough information in the available documents to answer that."
-3. Do NOT guess, infer, or fill gaps with general knowledge.
-4. Do NOT provide legal advice.
-5. Answer in clear, concise language suitable for the general public.
-6. Cite the document names you relied on.
-7. If appropriate, suggest which department or office to contact.
+Priority and sources:
+1. First use file search over the provided municipal document library.
+2. If the answer is not in the document library, use web search restricted to oak-park.us.
+3. If neither provides enough support, say you do not have enough information.
 
-Tone:
-- Neutral
-- Professional
-- Helpful
+Rules:
+- Do not guess.
+- Do not provide legal advice.
+- Keep answers concise.
+- Always include a Sources section.
 
 Output format:
-- Short answer paragraph
-- Sources section listing document names
-`
-    },
-    { role: "user", content: message }
-  ],
-tools: [
-  {
-    type: "file_search",
-    vector_store_ids: [process.env.VECTOR_STORE_ID],
-    max_num_results: 8
-  },
-  {
-    type: "web_search",
-    filters: {
-      allowed_domains: ["oak-park.us"]
-    }
-  }
-],
-include: ["file_search_call.results", "web_search_call.action.sources"]
-        
-    const { answer, citations } = extractAnswerAndCitations(response);
+Answer:
+<one short answer>
 
-    const reply = answer || "I could not find support in the uploaded documents for that question.";
+Sources:
+- <source list>
+`,
+        },
+        { role: "user", content: message },
+      ],
+      tools: [
+        {
+          type: "file_search",
+          vector_store_ids: [process.env.VECTOR_STORE_ID],
+          max_num_results: 8,
+        },
+        {
+          type: "web_search",
+          filters: {
+            allowed_domains: ["oak-park.us"],
+          },
+        },
+      ],
+      include: ["file_search_call.results", "web_search_call.action.sources"],
+    });
+
+    const { answer, citations, webSources } = extractAnswerAndCitations(response);
+
+    const sourcesTextParts: string[] = [];
+
+    if (citations.length) {
+      for (const c of citations) sourcesTextParts.push(`- ${c.filename}`);
+    }
+    if (webSources.length) {
+      for (const s of webSources) sourcesTextParts.push(`- ${s.title ?? s.url} (${s.url})`);
+    }
+
+    const sourcesText = sourcesTextParts.length ? `\n\nSources:\n${sourcesTextParts.join("\n")}` : "";
+
+    const reply =
+      (answer || "I could not find support in the documents or oak-park.us for that question.") + sourcesText;
 
     return Response.json({
       reply,
       citations,
+      webSources,
     });
   } catch (e: any) {
     return Response.json({ reply: `Server error: ${e?.message ?? "Unknown error"}` }, { status: 500 });
