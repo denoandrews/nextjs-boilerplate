@@ -71,7 +71,7 @@ export async function POST(req: Request) {
 You are MuniGPT, an informational assistant for municipal governments.
 
 Rules you must follow:
-1. Use ONLY the provided municipal documents retrieved via file search.
+1. Use the provided municipal documents retrieved via file search. If the answer is not in the document library, use web search restricted to http://oak-park.us. 
 2. If the documents do not contain enough information to answer, say:
    "I do not have enough information in the available documents to answer that."
 3. Do NOT guess, infer, or fill gaps with general knowledge.
@@ -92,16 +92,21 @@ Output format:
     },
     { role: "user", content: message }
   ],
-  tools: [
-    {
-      type: "file_search",
-      vector_store_ids: [process.env.VECTOR_STORE_ID],
-      max_num_results: 8
+tools: [
+  {
+    type: "file_search",
+    vector_store_ids: [process.env.VECTOR_STORE_ID],
+    max_num_results: 8
+  },
+  {
+    type: "web_search",
+    filters: {
+      allowed_domains: ["oak-park.us"]
     }
-  ],
-  include: ["file_search_call.results"]
-});
-
+  }
+],
+include: ["file_search_call.results", "web_search_call.action.sources"]
+        
     const { answer, citations } = extractAnswerAndCitations(response);
 
     const reply = answer || "I could not find support in the uploaded documents for that question.";
