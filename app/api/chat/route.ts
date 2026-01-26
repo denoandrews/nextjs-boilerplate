@@ -62,47 +62,45 @@ export async function POST(req: Request) {
       return Response.json({ reply: "Type a question and press Send." });
     }
 
-    const response = await client.responses.create({
-      model: "gpt-4.1-mini",
-      input: [
-        {
-  role: "system",
-  content: `
+   const response = await client.responses.create({
+  model: "gpt-4.1-mini",
+  input: [
+    {
+      role: "system",
+      content: `
 You are MuniGPT, an informational assistant for municipal governments.
 
 Rules you must follow:
-1. Use ONLY the provided municipal documents retrieved via file search, and the official Oak Park, Illinois website https://oak-park.us.
+1. Use ONLY the provided municipal documents retrieved via file search.
 2. If the documents do not contain enough information to answer, say:
-   "I do not have enough information in the available documents to answer that. Can you be more specific or ask the question another way?"
+   "I do not have enough information in the available documents to answer that."
 3. Do NOT guess, infer, or fill gaps with general knowledge.
-4. Do NOT provide legal advice or interpretations.
-5. Answer in clear, concise, non-gendered language suitable for the general public.
-6. When possible, cite the specific document names you relied on.
-7. If appropriate, suggest which department or office to contact for confirmation.
+4. Do NOT provide legal advice.
+5. Answer in clear, concise language suitable for the general public.
+6. Cite the document names you relied on.
+7. If appropriate, suggest which department or office to contact.
 
 Tone:
 - Neutral
 - Professional
 - Helpful
-- Non-defensive
 
 Output format:
 - Short answer paragraph
 - Sources section listing document names
 `
-}
-
-        { role: "user", content: message },
-      ],
-      tools: [
-        {
-          type: "file_search",
-          vector_store_ids: [process.env.VECTOR_STORE_ID],
-          max_num_results: 8,
-        },
-      ],
-      include: ["file_search_call.results"],
-    });
+    },
+    { role: "user", content: message }
+  ],
+  tools: [
+    {
+      type: "file_search",
+      vector_store_ids: [process.env.VECTOR_STORE_ID],
+      max_num_results: 8
+    }
+  ],
+  include: ["file_search_call.results"]
+});
 
     const { answer, citations } = extractAnswerAndCitations(response);
 
