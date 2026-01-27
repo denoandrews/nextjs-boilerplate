@@ -83,66 +83,71 @@ export async function POST(req: Request) {
       return Response.json({ reply: "Type a question and press Send." });
     }
 
-    const response = await client.responses.create({
+    const systemPrompt = `
+You are MuniGPT, an informational assistant for the Village of Oak Park.
+
+Rules:
+1. Do not guess.
+2. Do not provide legal advice.
+3. Keep answers concise.
+4. Always include a Sources section.
+
+If you used municipal documents, list the document file names in Sources.
+If you used the website, list the full oak-park.us page URLs in Sources.
+`;
+
+    // Pass 1: file search
+    const resp1 = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        { role: "system", content: systemPrompt + "\nFirst try the municipal document library using file search." },
+        { role: "user", content: message },
+      ],
+      tools: [
+        {
+          type: "file_search",
+          vector_store_ids: [process.env.VECTOR_STORE_ID],
+          max_num_results: 8,
+        },
+      ],
+    });
+
+    const text1 = (resp1.output_text ?? "").trim();
+
+    // Simple heuristic: if it says it cannot find info, do Pass 2
+    const looksLikeNoAnswer =
+      !text1 ||
+      text1.toLowerCase().includes("do not have enough information") ||
+      text1.toLowerCase().includes("did not return any information") ||
+      text1.toLowerCase().includes("not return any information") ||
+      text1.toLowerCase().includes("not found");
+
+    if (!looksLikeNoAnswer) {
+      return Response.json({ reply: text1 });
+    }
+
+    // Pass 2: web search forced with site restriction in the query
+    const webQuery = `site:oak-park.us ${message}`;
+
+    const resp2 = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
         {
           role: "system",
-          content:  `
-You are MuniGPT, an informational assistant for the Village of Oak Park.
-
-Priority and sources:
-1. First use file search using the provided municipal document library.
-2. Only if the file search does not support an answer, use web search, but do this automatically- don't make userrs ask.
-3. When using web search, you MUST restrict yourself to http://oak-park.us by using a site-limited query in your search behavior and by citing only http://oak-park.us pages.
-4. If neither the documents nor oak-park.us provides enough support, say you do not have enough information.
-
-Rules:
-- Do not guess.
-- Do not provide legal advice.
-- Keep answers concise.
-- Always include a Sources section.
-- Use non-gendered language.
-
-Sources requirements:
-- If you used municipal documents, list the document file names.
-- If you used the website, list the full oak park.us page URLs.
-`,
+          content:
+            systemPrompt +
+            "\nThe municipal document library did not contain the answer. Now you must use web search and only rely on oak-park.us pages. Include oak-park.us URLs in Sources.",
         },
-        { role: "user", content: message },
+        { role: "user", content: webQuery },
       ],
-      tools: [
-  {
-    type: "file_search",
-    vector_store_ids: [process.env.VECTOR_STORE_ID],
-    max_num_results: 8,
-  },
-  {
-    type: "web_search_preview",
-  },
-],
+      tools: [{ type: "web_search_preview" }],
+      tool_choice: "auto",
     });
 
-    const { answer, citations, webSources } = extractAnswerAndCitations(response);
-
-    const sourcesTextParts: string[] = [];
-
-    if (citations.length) {
-      for (const c of citations) sourcesTextParts.push(`- ${c.filename}`);
-    }
-    if (webSources.length) {
-      for (const s of webSources) sourcesTextParts.push(`- ${s.title ?? s.url} (${s.url})`);
-    }
-
-    const sourcesText = sourcesTextParts.length ? `\n\nSources:\n${sourcesTextParts.join("\n")}` : "";
-
-    const reply =
-      (answer || "I could not find support in the documents or oak-park.us for that question.") + sourcesText;
+    const text2 = (resp2.output_text ?? "").trim();
 
     return Response.json({
-      reply,
-      citations,
-      webSources,
+      reply: text2 || "I could not find an answer in the municipal documents or on oak-park.us.",
     });
   } catch (e: any) {
     return Response.json({ reply: `Server error: ${e?.message ?? "Unknown error"}` }, { status: 500 });
