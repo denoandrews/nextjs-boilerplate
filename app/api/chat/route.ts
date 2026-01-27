@@ -6,66 +6,9 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-function extractAnswerAndCitations(response: any) {
-  const output = Array.isArray(response?.output) ? response.output : [];
-  let answer = response?.output_text ?? "";
-
-  const citations: { file_id: string; filename: string }[] = [];
-  const webSources: { title?: string; url?: string }[] = [];
-
-  for (const item of output) {
-    // Web search call outputs can appear as tool calls in the output array
-    if (item?.type === "web_search_call") {
-      const sources = item?.action?.sources;
-      if (Array.isArray(sources)) {
-        for (const s of sources) {
-          webSources.push({ title: s?.title, url: s?.url });
-        }
-      }
-    }
-
-    if (item?.type !== "message") continue;
-
-    const content = Array.isArray(item?.content) ? item.content : [];
-    for (const part of content) {
-      if (part?.type !== "output_text") continue;
-
-      if (!answer && typeof part?.text === "string") {
-        answer = part.text;
-      }
-
-      const annotations = Array.isArray(part?.annotations) ? part.annotations : [];
-      for (const ann of annotations) {
-        if (ann?.type === "file_citation") {
-          citations.push({
-            file_id: ann.file_id,
-            filename: ann.filename,
-          });
-        }
-      }
-    }
-  }
-
-  // Deduplicate citations
-  const seenFiles = new Set<string>();
-  const uniqueCitations = citations.filter((c) => {
-    const key = `${c.file_id}:${c.filename}`;
-    if (seenFiles.has(key)) return false;
-    seenFiles.add(key);
-    return true;
-  });
-
-  // Deduplicate web sources
-  const seenUrls = new Set<string>();
-  const uniqueWebSources = webSources.filter((s) => {
-    const url = s.url ?? "";
-    if (!url) return false;
-    if (seenUrls.has(url)) return false;
-    seenUrls.add(url);
-    return true;
-  });
-
-  return { answer: (answer || "").trim(), citations: uniqueCitations, webSources: uniqueWebSources };
+function isLikelyPersonLookup(q: string) {
+  const s = q.toLowerCase().trim();
+  return s.startsWith("who is") || s.startsWith("who's") || s.includes("staff") || s.includes("director");
 }
 
 export async function POST(req: Request) {
@@ -83,7 +26,7 @@ export async function POST(req: Request) {
       return Response.json({ reply: "Type a question and press Send." });
     }
 
-    const systemPrompt = `
+    const baseSystemPrompt = `
 You are MuniGPT, an informational assistant for the Village of Oak Park.
 
 Rules:
@@ -92,15 +35,27 @@ Rules:
 3. Keep answers concise.
 4. Always include a Sources section.
 
-If you used municipal documents, list the document file names in Sources.
-If you used the website, list the full oak-park.us page URLs in Sources.
+Sources rules:
+- If you used municipal documents, list the document file names.
+- If you used the website, list the full oak-park.us page URLs.
 `;
 
-    // Pass 1: file search
-    const resp1 = await client.responses.create({
+    const forceWeb = isLikelyPersonLookup(message);
+
+    // Pass 1: municipal documents
+    const respDocs = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
-        { role: "system", content: systemPrompt + "\nFirst try the municipal document library using file search." },
+        {
+          role: "system",
+          content:
+            baseSystemPrompt +
+            `
+Pass 1 instructions:
+Use file search on the municipal documents. Answer only if the documents support it.
+If the documents do not support it, say "NOT FOUND IN DOCUMENTS" and still include Sources.
+`,
+        },
         { role: "user", content: message },
       ],
       tools: [
@@ -112,43 +67,51 @@ If you used the website, list the full oak-park.us page URLs in Sources.
       ],
     });
 
-    const text1 = (resp1.output_text ?? "").trim();
+    const textDocs = (respDocs.output_text ?? "").trim();
 
-    // Simple heuristic: if it says it cannot find info, do Pass 2
-    const looksLikeNoAnswer =
-      !text1 ||
-      text1.toLowerCase().includes("do not have enough information") ||
-      text1.toLowerCase().includes("did not return any information") ||
-      text1.toLowerCase().includes("not return any information") ||
-      text1.toLowerCase().includes("not found");
+    const docsNotFound =
+      !textDocs ||
+      textDocs.toLowerCase().includes("not found in documents") ||
+      textDocs.toLowerCase().includes("do not contain any information") ||
+      textDocs.toLowerCase().includes("do not have enough information");
 
-    if (!looksLikeNoAnswer) {
-      return Response.json({ reply: text1 });
+    // If docs answered and this is not a person lookup, return it
+    if (!docsNotFound && !forceWeb) {
+      return Response.json({ reply: `PASS 1 USED\n\n${textDocs}` });
     }
 
-    // Pass 2: web search forced with site restriction in the query
+    // Pass 2: website search, restricted by query and rules
     const webQuery = `site:oak-park.us ${message}`;
 
-    const resp2 = await client.responses.create({
+    const respWeb = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
         {
           role: "system",
           content:
-            systemPrompt +
-            "\nThe municipal document library did not contain the answer. Now you must use web search and only rely on oak-park.us pages. Include oak-park.us URLs in Sources.",
+            baseSystemPrompt +
+            `
+Pass 2 instructions:
+You must use web search now.
+You must rely only on oak-park.us pages.
+Include at least one oak-park.us URL in Sources if you provide an answer.
+If you cannot find it on oak-park.us, say that clearly and include Sources.
+`,
         },
         { role: "user", content: webQuery },
       ],
       tools: [{ type: "web_search_preview" }],
-      tool_choice: "auto",
     });
 
-    const text2 = (resp2.output_text ?? "").trim();
+    const textWeb = (respWeb.output_text ?? "").trim();
 
-    return Response.json({
-      reply: text2 || "I could not find an answer in the municipal documents or on oak-park.us.",
-    });
+    if (!textWeb) {
+      return Response.json({
+        reply: "PASS 2 USED\n\nI could not find an answer in the municipal documents or on oak-park.us.",
+      });
+    }
+
+    return Response.json({ reply: `PASS 2 USED\n\n${textWeb}` });
   } catch (e: any) {
     return Response.json({ reply: `Server error: ${e?.message ?? "Unknown error"}` }, { status: 500 });
   }
