@@ -7,6 +7,10 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+/* ============================
+   Types
+============================ */
+
 type ChatRole = "user" | "assistant";
 
 type HistoryMessage = {
@@ -14,10 +18,16 @@ type HistoryMessage = {
   content: string;
 };
 
-// In memory store: sessionId -> history
-// WARNING: resets on restart and will not be consistent across serverless instances.
-// For production: Redis or DB keyed by sessionId.
+/* ============================
+   In memory session store
+   NOTE: fine for dev, NOT prod
+============================ */
+
 const memory = new Map<string, HistoryMessage[]>();
+
+/* ============================
+   Helpers
+============================ */
 
 function isLikelyPersonLookup(q: string) {
   const s = q.toLowerCase().trim();
@@ -26,15 +36,12 @@ function isLikelyPersonLookup(q: string) {
 
 async function getOrCreateSessionId(): Promise<string> {
   const jar = await cookies();
-  const existing = jar.get("munigpt_sid")?.value?.trim();
+  const existing = jar.get("munigpt_sid")?.value;
 
   if (existing) return existing;
 
   const sid = crypto.randomUUID();
 
-  // HttpOnly means JS cannot read it, but browser sends it automatically.
-  // If your chat is embedded cross site (iframe on a different domain),
-  // you may need sameSite: "none" and secure: true.
   jar.set("munigpt_sid", sid, {
     httpOnly: true,
     sameSite: "lax",
@@ -51,36 +58,43 @@ function getHistory(sessionId: string): HistoryMessage[] {
 }
 
 function setHistory(sessionId: string, history: HistoryMessage[]) {
-  // Keep last 40 messages (about 20 turns)
-  const trimmed = history.slice(-40);
-  memory.set(sessionId, trimmed);
-  return trimmed;
+  // keep last 40 messages (about 20 turns)
+  memory.set(sessionId, history.slice(-40));
 }
 
-function buildInput(baseSystemPrompt: string, history: HistoryMessage[], userText: string) {
+function buildInput(
+  systemPrompt: string,
+  history: HistoryMessage[],
+  userText: string
+) {
   return [
-    { role: "system" as const, content: baseSystemPrompt },
-    ...history.map((m) => ({ role: m.role, content: m.content })),
+    { role: "system" as const, content: systemPrompt },
+    ...history.map(m => ({ role: m.role, content: m.content })),
     { role: "user" as const, content: userText },
   ];
 }
+
+/* ============================
+   Route
+============================ */
 
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
     const message = typeof body?.message === "string" ? body.message.trim() : "";
 
-    if (!process.env.OPENAI_API_KEY) {
-      return Response.json({ reply: "Missing OPENAI_API_KEY in server environment." }, { status: 500 });
-    }
-    if (!process.env.VECTOR_STORE_ID) {
-      return Response.json({ reply: "Missing VECTOR_STORE_ID in server environment." }, { status: 500 });
-    }
     if (!message) {
       return Response.json({ reply: "Type a question and press Send." });
     }
 
-    // Session identity from HttpOnly cookie, no client state needed
+    if (!process.env.OPENAI_API_KEY) {
+      return Response.json({ reply: "Missing OPENAI_API_KEY." }, { status: 500 });
+    }
+
+    if (!process.env.VECTOR_STORE_ID) {
+      return Response.json({ reply: "Missing VECTOR_STORE_ID." }, { status: 500 });
+    }
+
     const sessionId = await getOrCreateSessionId();
     const history = getHistory(sessionId);
 
@@ -100,19 +114,21 @@ Sources rules:
 
     const forceWeb = isLikelyPersonLookup(message);
 
-    // Pass 1: municipal documents
+    /* ============================
+       PASS 1: Documents
+    ============================ */
+
     const respDocs = await client.responses.create({
       model: "gpt-4.1-mini",
       input: buildInput(
-        (
-          baseSystemPrompt +
-          `
+        `
+${baseSystemPrompt}
 
 Pass 1 instructions:
-Use file search on the municipal documents. Answer only if the documents support it.
-If the documents do not support it, say "NOT FOUND IN DOCUMENTS" and still include Sources.
-`
-        ).trim(),
+Use file search on the municipal documents.
+Answer only if documents support it.
+If not found, say "NOT FOUND IN DOCUMENTS".
+`.trim(),
         history,
         message
       ),
@@ -129,9 +145,7 @@ If the documents do not support it, say "NOT FOUND IN DOCUMENTS" and still inclu
 
     const docsNotFound =
       !textDocs ||
-      textDocs.toLowerCase().includes("not found in documents") ||
-      textDocs.toLowerCase().includes("do not contain any information") ||
-      textDocs.toLowerCase().includes("do not have enough information");
+      textDocs.toLowerCase().includes("not found in documents");
 
     if (!docsNotFound && !forceWeb) {
       const reply = `PASS 1 USED\n\n${textDocs}`;
@@ -139,25 +153,23 @@ If the documents do not support it, say "NOT FOUND IN DOCUMENTS" and still inclu
       return Response.json({ reply });
     }
 
-    // Pass 2: website search
-    const webQuery = `site:oak-park.us ${message}`;
+    /* ============================
+       PASS 2: Website
+    ============================ */
 
     const respWeb = await client.responses.create({
       model: "gpt-4.1-mini",
       input: buildInput(
-        (
-          baseSystemPrompt +
-          `
+        `
+${baseSystemPrompt}
 
 Pass 2 instructions:
-You must use web search now.
-You must rely only on oak-park.us pages.
-Include at least one oak-park.us URL in Sources if you provide an answer.
-If you cannot find it on oak-park.us, say that clearly and include Sources.
-`
-        ).trim(),
+You must use web search.
+Only oak-park.us pages are allowed.
+Include URLs in Sources.
+`.trim(),
         history,
-        webQuery
+        `site:oak-park.us ${message}`
       ),
       tools: [{ type: "web_search_preview" }],
     });
@@ -166,12 +178,15 @@ If you cannot find it on oak-park.us, say that clearly and include Sources.
 
     const reply = textWeb
       ? `PASS 2 USED\n\n${textWeb}`
-      : "PASS 2 USED\n\nI could not find an answer in the municipal documents or on oak-park.us.";
+      : "PASS 2 USED\n\nI could not find an answer in municipal documents or on oak-park.us.";
 
     setHistory(sessionId, [...history, { role: "user", content: message }, { role: "assistant", content: reply }]);
 
     return Response.json({ reply });
-  } catch (e: any) {
-    return Response.json({ reply: `Server error: ${e?.message ?? "Unknown error"}` }, { status: 500 });
+  } catch (err: any) {
+    return Response.json(
+      { reply: `Server error: ${err?.message ?? "Unknown error"}` },
+      { status: 500 }
+    );
   }
 }
