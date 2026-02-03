@@ -2,11 +2,18 @@ import OpenAI from "openai";
 
 export const runtime = "nodejs";
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-// In memory store: conversationId -> array of messages
-// WARNING: resets on restart and not safe for serverless scale
-const memory = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
+type ChatRole = "user" | "assistant";
+
+type HistoryMessage = {
+  role: ChatRole;
+  content: string;
+};
+
+const memory = new Map<string, HistoryMessage[]>();
 
 function isLikelyPersonLookup(q: string) {
   const s = q.toLowerCase().trim();
@@ -18,21 +25,21 @@ function getConversationId(body: any) {
   return raw || crypto.randomUUID();
 }
 
-function getHistory(conversationId: string) {
+function getHistory(conversationId: string): HistoryMessage[] {
   return memory.get(conversationId) ?? [];
 }
 
-function setHistory(conversationId: string, history: Array<{ role: "user" | "assistant"; content: string }>) {
-  // Keep last 40 messages (20 turns user+assistant roughly)
+function setHistory(conversationId: string, history: HistoryMessage[]) {
+  // Keep last 40 messages, which is roughly 20 turns
   const trimmed = history.slice(-40);
   memory.set(conversationId, trimmed);
   return trimmed;
 }
 
-function buildInput(baseSystemPrompt: string, history: Array<{ role: "user" | "assistant"; content: string }>, userText: string) {
+function buildInput(baseSystemPrompt: string, history: HistoryMessage[], userText: string) {
   return [
     { role: "system" as const, content: baseSystemPrompt },
-    ...history.map(m => ({ role: m.role as const, content: m.content })),
+    ...history.map((m) => ({ role: m.role, content: m.content })),
     { role: "user" as const, content: userText },
   ];
 }
@@ -75,13 +82,15 @@ Sources rules:
     const respDocs = await client.responses.create({
       model: "gpt-4.1-mini",
       input: buildInput(
-        baseSystemPrompt +
+        (
+          baseSystemPrompt +
           `
 
 Pass 1 instructions:
 Use file search on the municipal documents. Answer only if the documents support it.
 If the documents do not support it, say "NOT FOUND IN DOCUMENTS" and still include Sources.
-`.trim(),
+`
+        ).trim(),
         history,
         message
       ),
@@ -103,10 +112,9 @@ If the documents do not support it, say "NOT FOUND IN DOCUMENTS" and still inclu
       textDocs.toLowerCase().includes("do not have enough information");
 
     if (!docsNotFound && !forceWeb) {
-      // Save the turn to memory
-      setHistory(conversationId, [...history, { role: "user", content: message }, { role: "assistant", content: textDocs }]);
-
-      return Response.json({ conversationId, reply: `PASS 1 USED\n\n${textDocs}` });
+      const reply = `PASS 1 USED\n\n${textDocs}`;
+      setHistory(conversationId, [...history, { role: "user", content: message }, { role: "assistant", content: reply }]);
+      return Response.json({ conversationId, reply });
     }
 
     // Pass 2: website search
@@ -115,7 +123,8 @@ If the documents do not support it, say "NOT FOUND IN DOCUMENTS" and still inclu
     const respWeb = await client.responses.create({
       model: "gpt-4.1-mini",
       input: buildInput(
-        baseSystemPrompt +
+        (
+          baseSystemPrompt +
           `
 
 Pass 2 instructions:
@@ -123,7 +132,8 @@ You must use web search now.
 You must rely only on oak-park.us pages.
 Include at least one oak-park.us URL in Sources if you provide an answer.
 If you cannot find it on oak-park.us, say that clearly and include Sources.
-`.trim(),
+`
+        ).trim(),
         history,
         webQuery
       ),
@@ -132,14 +142,13 @@ If you cannot find it on oak-park.us, say that clearly and include Sources.
 
     const textWeb = (respWeb.output_text ?? "").trim();
 
-    const finalAnswer = textWeb
+    const reply = textWeb
       ? `PASS 2 USED\n\n${textWeb}`
       : "PASS 2 USED\n\nI could not find an answer in the municipal documents or on oak-park.us.";
 
-    // Save the turn to memory
-    setHistory(conversationId, [...history, { role: "user", content: message }, { role: "assistant", content: finalAnswer }]);
+    setHistory(conversationId, [...history, { role: "user", content: message }, { role: "assistant", content: reply }]);
 
-    return Response.json({ conversationId, reply: finalAnswer });
+    return Response.json({ conversationId, reply });
   } catch (e: any) {
     return Response.json({ reply: `Server error: ${e?.message ?? "Unknown error"}` }, { status: 500 });
   }
