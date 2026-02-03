@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import OpenAI from "openai"; 
 import { cookies } from "next/headers";
 
 export const runtime = "nodejs";
