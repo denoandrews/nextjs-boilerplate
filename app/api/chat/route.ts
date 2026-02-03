@@ -2,13 +2,39 @@ import OpenAI from "openai";
 
 export const runtime = "nodejs";
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// In memory store: conversationId -> array of messages
+// WARNING: resets on restart and not safe for serverless scale
+const memory = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
 
 function isLikelyPersonLookup(q: string) {
   const s = q.toLowerCase().trim();
   return s.startsWith("who is") || s.startsWith("who's") || s.includes("staff") || s.includes("director");
+}
+
+function getConversationId(body: any) {
+  const raw = typeof body?.conversationId === "string" ? body.conversationId.trim() : "";
+  return raw || crypto.randomUUID();
+}
+
+function getHistory(conversationId: string) {
+  return memory.get(conversationId) ?? [];
+}
+
+function setHistory(conversationId: string, history: Array<{ role: "user" | "assistant"; content: string }>) {
+  // Keep last 40 messages (20 turns user+assistant roughly)
+  const trimmed = history.slice(-40);
+  memory.set(conversationId, trimmed);
+  return trimmed;
+}
+
+function buildInput(baseSystemPrompt: string, history: Array<{ role: "user" | "assistant"; content: string }>, userText: string) {
+  return [
+    { role: "system" as const, content: baseSystemPrompt },
+    ...history.map(m => ({ role: m.role as const, content: m.content })),
+    { role: "user" as const, content: userText },
+  ];
 }
 
 export async function POST(req: Request) {
@@ -26,6 +52,9 @@ export async function POST(req: Request) {
       return Response.json({ reply: "Type a question and press Send." });
     }
 
+    const conversationId = getConversationId(body);
+    const history = getHistory(conversationId);
+
     const baseSystemPrompt = `
 You are MuniGPT, an informational assistant for the Village of Oak Park.
 
@@ -38,26 +67,24 @@ Rules:
 Sources rules:
 - If you used municipal documents, list the document file names.
 - If you used the website, list the full oak-park.us page URLs.
-`;
+`.trim();
 
     const forceWeb = isLikelyPersonLookup(message);
 
     // Pass 1: municipal documents
     const respDocs = await client.responses.create({
       model: "gpt-4.1-mini",
-      input: [
-        {
-          role: "system",
-          content:
-            baseSystemPrompt +
-            `
+      input: buildInput(
+        baseSystemPrompt +
+          `
+
 Pass 1 instructions:
 Use file search on the municipal documents. Answer only if the documents support it.
 If the documents do not support it, say "NOT FOUND IN DOCUMENTS" and still include Sources.
-`,
-        },
-        { role: "user", content: message },
-      ],
+`.trim(),
+        history,
+        message
+      ),
       tools: [
         {
           type: "file_search",
@@ -75,43 +102,44 @@ If the documents do not support it, say "NOT FOUND IN DOCUMENTS" and still inclu
       textDocs.toLowerCase().includes("do not contain any information") ||
       textDocs.toLowerCase().includes("do not have enough information");
 
-    // If docs answered and this is not a person lookup, return it
     if (!docsNotFound && !forceWeb) {
-      return Response.json({ reply: `PASS 1 USED\n\n${textDocs}` });
+      // Save the turn to memory
+      setHistory(conversationId, [...history, { role: "user", content: message }, { role: "assistant", content: textDocs }]);
+
+      return Response.json({ conversationId, reply: `PASS 1 USED\n\n${textDocs}` });
     }
 
-    // Pass 2: website search, restricted by query and rules
+    // Pass 2: website search
     const webQuery = `site:oak-park.us ${message}`;
 
     const respWeb = await client.responses.create({
       model: "gpt-4.1-mini",
-      input: [
-        {
-          role: "system",
-          content:
-            baseSystemPrompt +
-            `
+      input: buildInput(
+        baseSystemPrompt +
+          `
+
 Pass 2 instructions:
 You must use web search now.
 You must rely only on oak-park.us pages.
 Include at least one oak-park.us URL in Sources if you provide an answer.
 If you cannot find it on oak-park.us, say that clearly and include Sources.
-`,
-        },
-        { role: "user", content: webQuery },
-      ],
+`.trim(),
+        history,
+        webQuery
+      ),
       tools: [{ type: "web_search_preview" }],
     });
 
     const textWeb = (respWeb.output_text ?? "").trim();
 
-    if (!textWeb) {
-      return Response.json({
-        reply: "PASS 2 USED\n\nI could not find an answer in the municipal documents or on oak-park.us.",
-      });
-    }
+    const finalAnswer = textWeb
+      ? `PASS 2 USED\n\n${textWeb}`
+      : "PASS 2 USED\n\nI could not find an answer in the municipal documents or on oak-park.us.";
 
-    return Response.json({ reply: `PASS 2 USED\n\n${textWeb}` });
+    // Save the turn to memory
+    setHistory(conversationId, [...history, { role: "user", content: message }, { role: "assistant", content: finalAnswer }]);
+
+    return Response.json({ conversationId, reply: finalAnswer });
   } catch (e: any) {
     return Response.json({ reply: `Server error: ${e?.message ?? "Unknown error"}` }, { status: 500 });
   }
