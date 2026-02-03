@@ -24,17 +24,17 @@ function isLikelyPersonLookup(q: string) {
   return s.startsWith("who is") || s.startsWith("who's") || s.includes("staff") || s.includes("director");
 }
 
-function getOrCreateSessionId(): string {
-  const jar = cookies();
+async function getOrCreateSessionId(): Promise<string> {
+  const jar = await cookies();
   const existing = jar.get("munigpt_sid")?.value?.trim();
 
   if (existing) return existing;
 
   const sid = crypto.randomUUID();
 
-  // HttpOnly means JS cannot read it, but the browser will send it automatically.
-  // sameSite "lax" is typically correct for chat widgets embedded on your own site.
-  // If this endpoint is called cross site from an iframe on a different domain, you may need sameSite "none" + secure true.
+  // HttpOnly means JS cannot read it, but browser sends it automatically.
+  // If your chat is embedded cross site (iframe on a different domain),
+  // you may need sameSite: "none" and secure: true.
   jar.set("munigpt_sid", sid, {
     httpOnly: true,
     sameSite: "lax",
@@ -80,8 +80,8 @@ export async function POST(req: Request) {
       return Response.json({ reply: "Type a question and press Send." });
     }
 
-    // Session identity comes from HttpOnly cookie; client does nothing.
-    const sessionId = getOrCreateSessionId();
+    // Session identity from HttpOnly cookie, no client state needed
+    const sessionId = await getOrCreateSessionId();
     const history = getHistory(sessionId);
 
     const baseSystemPrompt = `
