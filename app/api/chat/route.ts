@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { cookies } from "next/headers";
 
 export const runtime = "nodejs";
 
@@ -13,6 +14,9 @@ type HistoryMessage = {
   content: string;
 };
 
+// In memory store: sessionId -> history
+// WARNING: resets on restart and will not be consistent across serverless instances.
+// For production: Redis or DB keyed by sessionId.
 const memory = new Map<string, HistoryMessage[]>();
 
 function isLikelyPersonLookup(q: string) {
@@ -20,19 +24,36 @@ function isLikelyPersonLookup(q: string) {
   return s.startsWith("who is") || s.startsWith("who's") || s.includes("staff") || s.includes("director");
 }
 
-function getConversationId(body: any) {
-  const raw = typeof body?.conversationId === "string" ? body.conversationId.trim() : "";
-  return raw || crypto.randomUUID();
+function getOrCreateSessionId(): string {
+  const jar = cookies();
+  const existing = jar.get("munigpt_sid")?.value?.trim();
+
+  if (existing) return existing;
+
+  const sid = crypto.randomUUID();
+
+  // HttpOnly means JS cannot read it, but the browser will send it automatically.
+  // sameSite "lax" is typically correct for chat widgets embedded on your own site.
+  // If this endpoint is called cross site from an iframe on a different domain, you may need sameSite "none" + secure true.
+  jar.set("munigpt_sid", sid, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 60 * 60 * 6, // 6 hours
+  });
+
+  return sid;
 }
 
-function getHistory(conversationId: string): HistoryMessage[] {
-  return memory.get(conversationId) ?? [];
+function getHistory(sessionId: string): HistoryMessage[] {
+  return memory.get(sessionId) ?? [];
 }
 
-function setHistory(conversationId: string, history: HistoryMessage[]) {
-  // Keep last 40 messages, which is roughly 20 turns
+function setHistory(sessionId: string, history: HistoryMessage[]) {
+  // Keep last 40 messages (about 20 turns)
   const trimmed = history.slice(-40);
-  memory.set(conversationId, trimmed);
+  memory.set(sessionId, trimmed);
   return trimmed;
 }
 
@@ -59,8 +80,9 @@ export async function POST(req: Request) {
       return Response.json({ reply: "Type a question and press Send." });
     }
 
-    const conversationId = getConversationId(body);
-    const history = getHistory(conversationId);
+    // Session identity comes from HttpOnly cookie; client does nothing.
+    const sessionId = getOrCreateSessionId();
+    const history = getHistory(sessionId);
 
     const baseSystemPrompt = `
 You are MuniGPT, an informational assistant for the Village of Oak Park.
@@ -113,8 +135,8 @@ If the documents do not support it, say "NOT FOUND IN DOCUMENTS" and still inclu
 
     if (!docsNotFound && !forceWeb) {
       const reply = `PASS 1 USED\n\n${textDocs}`;
-      setHistory(conversationId, [...history, { role: "user", content: message }, { role: "assistant", content: reply }]);
-      return Response.json({ conversationId, reply });
+      setHistory(sessionId, [...history, { role: "user", content: message }, { role: "assistant", content: reply }]);
+      return Response.json({ reply });
     }
 
     // Pass 2: website search
@@ -146,9 +168,9 @@ If you cannot find it on oak-park.us, say that clearly and include Sources.
       ? `PASS 2 USED\n\n${textWeb}`
       : "PASS 2 USED\n\nI could not find an answer in the municipal documents or on oak-park.us.";
 
-    setHistory(conversationId, [...history, { role: "user", content: message }, { role: "assistant", content: reply }]);
+    setHistory(sessionId, [...history, { role: "user", content: message }, { role: "assistant", content: reply }]);
 
-    return Response.json({ conversationId, reply });
+    return Response.json({ reply });
   } catch (e: any) {
     return Response.json({ reply: `Server error: ${e?.message ?? "Unknown error"}` }, { status: 500 });
   }
