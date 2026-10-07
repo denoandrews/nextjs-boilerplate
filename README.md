@@ -2,7 +2,7 @@
 
 MuniGPT is a public-records research assistant for municipalities. It answers questions only from configured OpenAI vector stores and displays file citations returned by the OpenAI Responses API.
 
-This repository currently contains the public research prototype. Municipal administration, document ingestion, persistent question logging, and the embeddable widget are planned product milestones.
+This repository contains a tenant-ready product foundation: public cited chat, an iframe widget, municipal administrator sign-in, private document storage and vector-store ingestion, and persistent public-question logging.
 
 ## Local development
 
@@ -31,8 +31,52 @@ This repository currently contains the public research prototype. Municipal admi
 | `VECTOR_STORE_IDS` | Yes* | Comma-separated vector store IDs for municipal, county, state, or trusted-source collections. Takes precedence over `VECTOR_STORE_ID`. |
 | `MUNICIPALITY_NAME` | Recommended | Public name displayed by the assistant and used to scope its instructions. |
 | `OPENAI_MODEL` | No | Responses API model. Defaults to `gpt-4.1-mini`. |
+| `MUNICIPALITY_SLUG` | Recommended | Slug used by the environment-only fallback tenant. |
+| `NEXT_PUBLIC_SUPABASE_URL` | Admin | Supabase project URL. |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Admin | Browser-safe Supabase publishable key. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Logging | Server-only key used for anonymous chat logging and tenant lookup. |
+| `NEXT_PUBLIC_APP_URL` | Recommended | Canonical app origin used to generate embed code. |
+| `EMBED_FRAME_ANCESTORS` | Production | Space-separated CSP origins allowed to embed `/widget/*`. |
 
 \* Configure either `VECTOR_STORE_ID` or `VECTOR_STORE_IDS`.
+
+Supabase variables are configuration-gated. Without them, the existing public single-municipality chat still works from environment configuration, chat logging is skipped, and administrator access is unavailable.
+
+## Supabase setup
+
+1. Create a Supabase project.
+2. Run `supabase/migrations/20261007193000_initial_schema.sql` in the SQL editor or with the Supabase CLI.
+3. Create the first staff account under Authentication > Users. Public self-signup is not provided by this app.
+4. Insert the municipality and first membership. `supabase/seed.sql` contains a commented template.
+5. Add the three Supabase variables to the Vercel project for Preview and Production.
+6. Add the municipality's OpenAI vector store ID to `municipalities.vector_store_ids`.
+7. Set `EMBED_FRAME_ANCESTORS` to the approved municipal website origins, for example `'self' https://www.example.gov`.
+
+The service-role key must remain server-side and must never use the `NEXT_PUBLIC_` prefix.
+
+## Product routes
+
+| Route | Purpose |
+| --- | --- |
+| `/` | Environment-configured public research assistant. |
+| `/widget/[municipalitySlug]` | Tenant-aware iframe destination. |
+| `/admin/login` | Staff sign-in. |
+| `/admin/set-password` | Invitation acceptance and initial password setup. |
+| `/admin` | Protected document list, upload, question count, and embed code. |
+| `/api/chat` | File-search-only cited chat with best-effort analytics logging. |
+| `/api/admin/documents` | Authenticated, role-checked document listing and ingestion. |
+
+Example embed:
+
+```html
+<iframe
+  src="https://your-munigpt-domain.example/widget/strawberry-point-ia"
+  title="City of Strawberry Point public records assistant"
+  width="100%"
+  height="640"
+  loading="lazy"
+></iframe>
+```
 
 ## Current safeguards
 
@@ -43,6 +87,11 @@ This repository currently contains the public research prototype. Municipal admi
 - Questions and submitted conversation history are length-limited.
 - Public error responses do not expose server exception details.
 - Responses are marked `no-store`.
+- Supabase row-level security isolates each municipality's staff data.
+- The private storage bucket scopes paths to municipality IDs and editor roles.
+- Administrator routes fail closed when Supabase is missing or the user lacks membership.
+- Uploads enforce a file allowlist and 20 MB size limit.
+- Widget embedding is controlled with a `frame-ancestors` Content Security Policy.
 
 ## Verification
 
@@ -53,4 +102,10 @@ npm run build
 npm audit --omit=dev
 ```
 
-The next milestone will add persistent storage, municipal administrator authentication, document ingestion and publishing, question review, tenant isolation, and iframe embed delivery.
+## Still required before selling
+
+- Provision the production Supabase project and apply the migration.
+- Seed each municipality and invite its administrators.
+- Configure approved embed origins and a vector-store strategy per customer.
+- Add billing, rate limiting, retention jobs, document replacement/deletion workflows, full question review, audit reporting, and operational monitoring.
+- Complete legal/privacy review, accessibility testing, incident procedures, backups, and municipal procurement/security materials.

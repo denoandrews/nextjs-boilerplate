@@ -1,4 +1,6 @@
 import OpenAI from "openai";
+import { logChatExchange } from "@/lib/chat-logging";
+import { getMunicipalityConfig } from "@/lib/municipalities";
 
 export const runtime = "nodejs";
 
@@ -20,6 +22,9 @@ type Citation = {
 type ChatRequest = {
   message?: unknown;
   history?: unknown;
+  municipalitySlug?: unknown;
+  conversationId?: unknown;
+  anonymousSessionId?: unknown;
 };
 
 function jsonResponse(body: unknown, status: number, requestId: string) {
@@ -50,18 +55,6 @@ function parseHistory(value: unknown): HistoryMessage[] {
       role: item.role,
       content: item.content.trim().slice(0, MAX_MESSAGE_LENGTH),
     }));
-}
-
-function getVectorStoreIds(): string[] {
-  const configured = process.env.VECTOR_STORE_IDS ?? process.env.VECTOR_STORE_ID ?? "";
-  return configured
-    .split(",")
-    .map((id) => id.trim())
-    .filter(Boolean);
-}
-
-function getMunicipalityName(): string {
-  return process.env.MUNICIPALITY_NAME?.trim() || "the participating municipality";
 }
 
 function getModel(): string {
@@ -128,20 +121,27 @@ export async function POST(req: Request) {
       return jsonResponse({ error: "MuniGPT is not configured.", requestId }, 503, requestId);
     }
 
-    const vectorStoreIds = getVectorStoreIds();
-    if (vectorStoreIds.length === 0) {
+    const municipalitySlug =
+      typeof body.municipalitySlug === "string" ? body.municipalitySlug.trim().slice(0, 80) : undefined;
+    const municipality = await getMunicipalityConfig(municipalitySlug);
+
+    if (!municipality) {
+      return jsonResponse({ error: "Municipality not found.", requestId }, 404, requestId);
+    }
+
+    if (municipality.vectorStoreIds.length === 0) {
       console.error(`[${requestId}] No vector store is configured.`);
       return jsonResponse({ error: "MuniGPT is not configured.", requestId }, 503, requestId);
     }
 
-    const municipalityName = getMunicipalityName();
     const history = parseHistory(body.history);
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const model = getModel();
 
     const response = await client.responses.create({
-      model: getModel(),
+      model,
       instructions: `
-You are MuniGPT, a public-records research assistant for ${municipalityName}.
+You are MuniGPT, a public-records research assistant for ${municipality.name}.
 
 Use only the records returned by file search. Do not use outside knowledge.
 
@@ -158,7 +158,7 @@ Rules:
       tools: [
         {
           type: "file_search",
-          vector_store_ids: vectorStoreIds,
+          vector_store_ids: municipality.vectorStoreIds,
           max_num_results: 8,
         },
       ],
@@ -167,24 +167,28 @@ Rules:
     const answer = response.output_text.trim();
     const citations = extractCitations(response);
 
-    if (!answer) {
-      return jsonResponse(
-        {
-          answer: "I could not establish an answer from the available records.",
-          citations: [],
-          municipality: municipalityName,
-          requestId,
-        },
-        200,
-        requestId
-      );
-    }
+    const finalAnswer = answer || "I could not establish an answer from the available records.";
+    const conversationId =
+      typeof body.conversationId === "string" ? body.conversationId.slice(0, 80) : undefined;
+    const anonymousSessionId =
+      typeof body.anonymousSessionId === "string" ? body.anonymousSessionId.slice(0, 80) : undefined;
+    const logged = await logChatExchange({
+      municipalityId: municipality.id,
+      conversationId,
+      anonymousSessionId,
+      question: message,
+      answer: finalAnswer,
+      citations,
+      requestId,
+      model,
+    });
 
     return jsonResponse(
       {
-        answer,
+        answer: finalAnswer,
         citations,
-        municipality: municipalityName,
+        municipality: municipality.name,
+        conversationId: logged.conversationId,
         requestId,
       },
       200,
