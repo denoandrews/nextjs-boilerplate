@@ -1,0 +1,7 @@
+-- Replace the sample values, then run after creating the first administrator in Supabase Auth.
+-- insert into public.municipalities (slug, name, state, county, vector_store_ids, allowed_domains)
+-- values ('strawberry-point-ia', 'City of Strawberry Point, Iowa', 'IA', 'Clayton', array['vs_replace_me'], array['https://replace-me.gov']);
+--
+-- insert into public.municipality_memberships (municipality_id, user_id, role)
+-- select m.id, 'replace-with-auth-user-uuid'::uuid, 'admin'
+-- from public.municipalities m where m.slug = 'strawberry-point-ia';
