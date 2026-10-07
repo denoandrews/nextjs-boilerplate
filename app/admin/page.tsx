@@ -7,7 +7,7 @@ import { UploadForm } from "./upload-form";
 export default async function AdminPage() {
   const context = await requireAdminContext();
   const supabase = await createClient();
-  const [{ data: documents }, { count: questionCount }, { data: recentQuestions }] = await Promise.all([
+  const [{ data: documents }, { count: questionCount }, { data: recentQuestions }, { data: usageData }] = await Promise.all([
     supabase
       .from("documents")
       .select("id, title, document_type, status, created_at")
@@ -26,7 +26,14 @@ export default async function AdminPage() {
       .eq("conversations.municipality_id", context.municipalityId)
       .order("created_at", { ascending: false })
       .limit(20),
+    supabase.rpc("get_municipality_usage_summary", {
+      p_municipality_id: context.municipalityId,
+    }),
   ]);
+  const usage = Array.isArray(usageData) ? usageData[0] : usageData;
+  const monthlyQueryCount = Number(usage?.query_count ?? 0);
+  const monthlyQueryLimit = Number(usage?.monthly_limit ?? 15_000);
+  const estimatedCost = Number(usage?.estimated_cost_microusd ?? 0) / 1_000_000;
   const requestHeaders = await headers();
   const origin = requestHeaders.get("x-forwarded-host")
     ? `${requestHeaders.get("x-forwarded-proto") || "https"}://${requestHeaders.get("x-forwarded-host")}`
@@ -43,6 +50,8 @@ export default async function AdminPage() {
       <section className="admin-grid">
         <article className="admin-card metric"><strong>{documents?.length ?? 0}</strong><span>Recent documents</span></article>
         <article className="admin-card metric"><strong>{questionCount ?? 0}</strong><span>Public questions saved</span></article>
+        <article className="admin-card metric"><strong>{monthlyQueryCount.toLocaleString()} / {monthlyQueryLimit.toLocaleString()}</strong><span>Questions this month</span></article>
+        <article className="admin-card metric"><strong>{estimatedCost.toLocaleString("en-US", { style: "currency", currency: "USD" })}</strong><span>Estimated OpenAI cost this month</span></article>
       </section>
       <section className="admin-card">
         <h2>Upload a public document</h2>

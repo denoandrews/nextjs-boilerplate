@@ -25,18 +25,22 @@ function environmentConfig(): MunicipalityConfig {
 }
 
 export async function getMunicipalityConfig(slug?: string): Promise<MunicipalityConfig | null> {
-  if (!slug || !isSupabaseAdminConfigured()) return environmentConfig();
+  const fallback = environmentConfig();
+  if (!isSupabaseAdminConfigured()) return fallback;
+
+  const effectiveSlug = slug || fallback.slug;
+  if (!effectiveSlug || effectiveSlug === "default") return fallback;
 
   const supabase = createAdminClient();
   const { data, error } = await supabase
     .from("municipalities")
     .select("id, slug, name, vector_store_ids")
-    .eq("slug", slug)
+    .eq("slug", effectiveSlug)
     .eq("active", true)
     .maybeSingle();
 
   if (error) throw error;
-  if (!data) return null;
+  if (!data) return slug ? null : fallback;
 
   return {
     id: data.id,

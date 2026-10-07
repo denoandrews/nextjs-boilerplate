@@ -1,5 +1,7 @@
 import OpenAI from "openai";
+import { reserveChatQuery } from "@/lib/chat-limits";
 import { logChatExchange } from "@/lib/chat-logging";
+import { extractChatUsage, logUsageEvent } from "@/lib/chat-usage";
 import { getMunicipalityConfig } from "@/lib/municipalities";
 
 export const runtime = "nodejs";
@@ -59,6 +61,12 @@ function parseHistory(value: unknown): HistoryMessage[] {
 
 function getModel(): string {
   return process.env.OPENAI_MODEL?.trim() || "gpt-4.1-mini";
+}
+
+function getMaxOutputTokens(): number {
+  const configured = Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS ?? "", 10);
+  if (!Number.isFinite(configured)) return 800;
+  return Math.min(2_000, Math.max(100, configured));
 }
 
 function buildInput(history: HistoryMessage[], userText: string) {
@@ -134,12 +142,42 @@ export async function POST(req: Request) {
       return jsonResponse({ error: "MuniGPT is not configured.", requestId }, 503, requestId);
     }
 
+    const anonymousSessionId =
+      typeof body.anonymousSessionId === "string" ? body.anonymousSessionId.slice(0, 80) : undefined;
+    const limitDecision = await reserveChatQuery({
+      municipalityId: municipality.id,
+      request: req,
+      anonymousSessionId,
+    });
+
+    if (!limitDecision.allowed) {
+      const monthlyQuotaReached = limitDecision.reason === "monthly_quota";
+      const unavailable = limitDecision.reason === "unavailable";
+      const response = jsonResponse(
+        {
+          error: monthlyQuotaReached
+            ? "This municipality has reached its monthly research limit."
+            : unavailable
+              ? "MuniGPT is temporarily unavailable. Please try again shortly."
+              : "Too many questions were submitted. Please wait a moment and try again.",
+          requestId,
+        },
+        unavailable ? 503 : 429,
+        requestId
+      );
+      if (limitDecision.retryAfterSeconds) {
+        response.headers.set("Retry-After", String(limitDecision.retryAfterSeconds));
+      }
+      return response;
+    }
+
     const history = parseHistory(body.history);
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const model = getModel();
 
     const response = await client.responses.create({
       model,
+      max_output_tokens: getMaxOutputTokens(),
       instructions: `
 You are MuniGPT, a public-records research assistant for ${municipality.name}.
 
@@ -166,12 +204,18 @@ Rules:
 
     const answer = response.output_text.trim();
     const citations = extractCitations(response);
+    const usage = extractChatUsage(response);
+
+    await logUsageEvent({
+      municipalityId: municipality.id,
+      requestId,
+      model,
+      ...usage,
+    });
 
     const finalAnswer = answer || "I could not establish an answer from the available records.";
     const conversationId =
       typeof body.conversationId === "string" ? body.conversationId.slice(0, 80) : undefined;
-    const anonymousSessionId =
-      typeof body.anonymousSessionId === "string" ? body.anonymousSessionId.slice(0, 80) : undefined;
     const logged = await logChatExchange({
       municipalityId: municipality.id,
       conversationId,
