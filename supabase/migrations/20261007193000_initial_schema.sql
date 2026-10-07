@@ -162,6 +162,21 @@ $$;
 grant execute on function public.is_municipality_member(uuid) to authenticated;
 grant execute on function public.has_municipality_role(uuid, public.municipality_role[]) to authenticated;
 
+-- Supabase projects can disable automatic Data API grants. Grant the API roles
+-- explicit table and sequence privileges; row-level security still controls
+-- which rows authenticated users may access.
+grant usage on schema public to authenticated, service_role;
+grant select, insert, update, delete on all tables in schema public to authenticated;
+grant all privileges on all tables in schema public to service_role;
+grant usage, select on all sequences in schema public to authenticated, service_role;
+
+alter default privileges in schema public
+  grant select, insert, update, delete on tables to authenticated;
+alter default privileges in schema public
+  grant all privileges on tables to service_role;
+alter default privileges in schema public
+  grant usage, select on sequences to authenticated, service_role;
+
 alter table public.municipalities enable row level security;
 alter table public.municipality_memberships enable row level security;
 alter table public.document_sources enable row level security;
