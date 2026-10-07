@@ -31,6 +31,8 @@ This repository contains a tenant-ready product foundation: public cited chat, a
 | `VECTOR_STORE_IDS` | Yes* | Comma-separated vector store IDs for municipal, county, state, or trusted-source collections. Takes precedence over `VECTOR_STORE_ID`. |
 | `MUNICIPALITY_NAME` | Recommended | Public name displayed by the assistant and used to scope its instructions. |
 | `OPENAI_MODEL` | No | Responses API model. Defaults to `gpt-4.1-mini`. |
+| `OPENAI_MAX_OUTPUT_TOKENS` | No | Hard answer ceiling. Defaults to `800`; constrained to 100–2,000. |
+| `RATE_LIMIT_SALT` | Production | Secret salt used to hash public-client identifiers before rate-limit storage. |
 | `MUNICIPALITY_SLUG` | Recommended | Slug used by the environment-only fallback tenant. |
 | `NEXT_PUBLIC_SUPABASE_URL` | Admin | Supabase project URL. |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Admin | Browser-safe Supabase publishable key. |
@@ -45,7 +47,7 @@ Supabase variables are configuration-gated. Without them, the existing public si
 ## Supabase setup
 
 1. Create a Supabase project.
-2. Run `supabase/migrations/20261007193000_initial_schema.sql` in the SQL editor or with the Supabase CLI.
+2. Apply every SQL file in `supabase/migrations` in filename order with the Supabase CLI or SQL editor.
 3. Create the first staff account under Authentication > Users. Public self-signup is not provided by this app.
 4. Insert the municipality and first membership. `supabase/seed.sql` contains a commented template.
 5. Add the three Supabase variables to the Vercel project for Preview and Production.
@@ -85,6 +87,10 @@ Example embed:
 - The server, not the browser, selects the vector stores.
 - Citations are extracted from API response annotations rather than generated as plain text.
 - Questions and submitted conversation history are length-limited.
+- Answers have a hard output-token ceiling (800 by default).
+- Atomic per-municipality monthly quotas prevent concurrent requests from exceeding the configured allowance.
+- Hashed public-client rate limits reject more than 10 questions per minute by default without storing raw IP addresses.
+- Exact API token counts, file-search calls, and estimated OpenAI cost are logged per successful response.
 - Public error responses do not expose server exception details.
 - Responses are marked `no-store`.
 - Supabase row-level security isolates each municipality's staff data.
@@ -107,5 +113,5 @@ npm audit --omit=dev
 - Provision the production Supabase project and apply the migration.
 - Seed each municipality and invite its administrators.
 - Configure approved embed origins and a vector-store strategy per customer.
-- Add billing, rate limiting, retention jobs, document replacement/deletion workflows, full question review, audit reporting, and operational monitoring.
+- Add billing, retention jobs, document replacement/deletion workflows, full question review, audit reporting, and operational monitoring.
 - Complete legal/privacy review, accessibility testing, incident procedures, backups, and municipal procurement/security materials.
