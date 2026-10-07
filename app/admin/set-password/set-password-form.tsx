@@ -15,7 +15,31 @@ export function SetPasswordForm({ configured }: { configured: boolean }) {
     const supabase = createClient();
     let active = true;
 
-    supabase.auth.getSession().then(({ data, error: sessionError }) => {
+    async function loadSession() {
+      const hash = new URLSearchParams(window.location.hash.slice(1));
+      const accessToken = hash.get("access_token");
+      const refreshToken = hash.get("refresh_token");
+      const code = new URLSearchParams(window.location.search).get("code");
+
+      if (accessToken && refreshToken) {
+        const result = await supabase.auth.setSession({
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        });
+        window.history.replaceState(null, "", window.location.pathname);
+        return result;
+      }
+
+      if (code) {
+        const result = await supabase.auth.exchangeCodeForSession(code);
+        window.history.replaceState(null, "", window.location.pathname);
+        return result;
+      }
+
+      return supabase.auth.getSession();
+    }
+
+    loadSession().then(({ data, error: sessionError }) => {
       if (!active) return;
       if (sessionError || !data.session) {
         setError("This invitation link is invalid or has expired. Ask your MuniGPT administrator for a new invitation.");
