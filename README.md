@@ -61,6 +61,7 @@ The service-role key must remain server-side and must never use the `NEXT_PUBLIC
 | `/` | Environment-configured public research assistant. |
 | `/widget/[municipalitySlug]` | Tenant-aware iframe destination. |
 | `/admin/login` | Staff sign-in. |
+| `/admin/set-password` | Invitation acceptance and initial password setup. |
 | `/admin` | Protected document list, upload, question count, and embed code. |
 | `/api/chat` | File-search-only cited chat with best-effort analytics logging. |
 | `/api/admin/documents` | Authenticated, role-checked document listing and ingestion. |
