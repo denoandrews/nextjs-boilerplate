@@ -54,8 +54,8 @@ export default async function AdminPage() {
         <article className="admin-card metric"><strong>{estimatedCost.toLocaleString("en-US", { style: "currency", currency: "USD" })}</strong><span>Estimated OpenAI cost this month</span></article>
       </section>
       <section className="admin-card">
-        <h2>Upload a public document</h2>
-        <p>Accepted: PDF, Word, text, Markdown, and HTML. Maximum 20 MB.</p>
+        <h2>Upload public documents</h2>
+        <p>Select a meeting packet or a group of individual records, review the automatically generated titles and document types, then upload the entire batch.</p>
         <UploadForm canEdit={context.role === "admin" || context.role === "editor"} />
       </section>
       <section className="admin-card">

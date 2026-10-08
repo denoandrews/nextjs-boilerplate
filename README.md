@@ -64,7 +64,7 @@ The service-role key must remain server-side and must never use the `NEXT_PUBLIC
 | `/widget/[municipalitySlug]` | Tenant-aware iframe destination. |
 | `/admin/login` | Staff sign-in. |
 | `/admin/set-password` | Invitation acceptance and initial password setup. |
-| `/admin` | Protected document list, upload, question count, and embed code. |
+| `/admin` | Protected document list, batch upload, question count, usage cost, and embed code. |
 | `/api/chat` | File-search-only cited chat with best-effort analytics logging. |
 | `/api/admin/documents` | Authenticated, role-checked document listing and ingestion. |
 
@@ -96,7 +96,8 @@ Example embed:
 - Supabase row-level security isolates each municipality's staff data.
 - The private storage bucket scopes paths to municipality IDs and editor roles.
 - Administrator routes fail closed when Supabase is missing or the user lacks membership.
-- Uploads enforce a file allowlist and 20 MB size limit.
+- Administrators can review and upload batches of up to 25 documents, with editable per-file titles, document types, and independent results.
+- Uploads enforce a file allowlist and 20 MB per-file size limit.
 - Widget embedding is controlled with a `frame-ancestors` Content Security Policy.
 
 ## Verification
