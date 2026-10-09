@@ -1,5 +1,5 @@
 export const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
-export const MAX_BATCH_DOCUMENTS = 25;
+export const MAX_BATCH_DOCUMENTS = 500;
 
 const ALLOWED_EXTENSIONS = new Set(["pdf", "txt", "md", "html", "doc", "docx"]);
 const ALLOWED_DOCUMENT_TYPES = new Set([
