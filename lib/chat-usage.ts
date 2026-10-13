@@ -10,6 +10,7 @@ export type ChatUsage = {
   outputTokens: number;
   totalTokens: number;
   fileSearchCalls: number;
+  webSearchCalls?: number;
   estimatedCostMicrousd: number;
 };
 
@@ -37,7 +38,8 @@ export function estimateCostMicrousd(input: Omit<ChatUsage, "estimatedCostMicrou
   const fileSearchCost =
     input.fileSearchCalls * envRate("OPENAI_FILE_SEARCH_COST_PER_THOUSAND", 2.5) * 1_000;
 
-  return Math.round(tokenCost + fileSearchCost);
+  const webSearchCost = (input.webSearchCalls ?? 0) * envRate("OPENAI_WEB_SEARCH_COST_PER_THOUSAND", 10) * 1_000;
+  return Math.round(tokenCost + fileSearchCost + webSearchCost);
 }
 
 export function extractChatUsage(response: OpenAI.Responses.Response): ChatUsage {
@@ -52,6 +54,7 @@ export function extractChatUsage(response: OpenAI.Responses.Response): ChatUsage
     outputTokens,
     totalTokens,
     fileSearchCalls,
+    webSearchCalls: response.output.filter((item) => item.type === "web_search_call").length,
   };
 
   return { ...rawUsage, estimatedCostMicrousd: estimateCostMicrousd(rawUsage) };
@@ -79,3 +82,4 @@ export async function logUsageEvent(input: UsageEvent): Promise<void> {
     console.error(`[${input.requestId}] Failed to save OpenAI usage.`, error);
   }
 }
+

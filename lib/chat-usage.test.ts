@@ -7,6 +7,10 @@ afterEach(() => {
 });
 
 describe("chat usage accounting", () => {
+  it("includes hosted web-search call fees in the existing cost estimate", () => {
+    expect(estimateCostMicrousd({ inputTokens: 0, cachedInputTokens: 0, outputTokens: 0,
+      totalTokens: 0, fileSearchCalls: 0, webSearchCalls: 2 })).toBe(20_000);
+  });
   it("estimates the default gpt-4.1-mini and file-search cost", () => {
     expect(
       estimateCostMicrousd({
@@ -57,3 +61,4 @@ describe("chat usage accounting", () => {
     });
   });
 });
+
