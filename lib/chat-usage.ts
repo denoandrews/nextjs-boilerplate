@@ -25,16 +25,17 @@ function envRate(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-export function estimateCostMicrousd(input: Omit<ChatUsage, "estimatedCostMicrousd">): number {
+export function estimateCostMicrousd(input: Omit<ChatUsage, "estimatedCostMicrousd">, model?: string): number {
   const cachedTokens = Math.min(input.cachedInputTokens, input.inputTokens);
   const uncachedTokens = input.inputTokens - cachedTokens;
 
   // Rates are USD per million tokens and USD per thousand tool calls. In
   // microdollars, the token calculation simplifies to tokens * rate.
+  const newsModel = model === "gpt-5.4-mini";
   const tokenCost =
-    uncachedTokens * envRate("OPENAI_INPUT_COST_PER_MILLION", 0.4) +
-    cachedTokens * envRate("OPENAI_CACHED_INPUT_COST_PER_MILLION", 0.1) +
-    input.outputTokens * envRate("OPENAI_OUTPUT_COST_PER_MILLION", 1.6);
+    uncachedTokens * envRate("OPENAI_INPUT_COST_PER_MILLION", newsModel ? 0.75 : 0.4) +
+    cachedTokens * envRate("OPENAI_CACHED_INPUT_COST_PER_MILLION", newsModel ? 0.075 : 0.1) +
+    input.outputTokens * envRate("OPENAI_OUTPUT_COST_PER_MILLION", newsModel ? 4.5 : 1.6);
   const fileSearchCost =
     input.fileSearchCalls * envRate("OPENAI_FILE_SEARCH_COST_PER_THOUSAND", 2.5) * 1_000;
 
@@ -42,7 +43,7 @@ export function estimateCostMicrousd(input: Omit<ChatUsage, "estimatedCostMicrou
   return Math.round(tokenCost + fileSearchCost + webSearchCost);
 }
 
-export function extractChatUsage(response: OpenAI.Responses.Response): ChatUsage {
+export function extractChatUsage(response: OpenAI.Responses.Response, model?: string): ChatUsage {
   const inputTokens = response.usage?.input_tokens ?? 0;
   const cachedInputTokens = response.usage?.input_tokens_details?.cached_tokens ?? 0;
   const outputTokens = response.usage?.output_tokens ?? 0;
@@ -57,7 +58,7 @@ export function extractChatUsage(response: OpenAI.Responses.Response): ChatUsage
     webSearchCalls: response.output.filter((item) => item.type === "web_search_call").length,
   };
 
-  return { ...rawUsage, estimatedCostMicrousd: estimateCostMicrousd(rawUsage) };
+  return { ...rawUsage, estimatedCostMicrousd: estimateCostMicrousd(rawUsage, model) };
 }
 
 export async function logUsageEvent(input: UsageEvent): Promise<void> {

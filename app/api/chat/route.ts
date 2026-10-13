@@ -146,12 +146,14 @@ export async function POST(req: Request) {
 
     const history = parseHistory(body.history);
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const model = getModel();
     const newsDomains = newspaperDomains(municipality.slug);
+    // Domain-filtered search requires a newer model than GPT-4.1 Mini.
+    const model = newsDomains.length ? "gpt-5.4-mini" : getModel();
 
     const response = await client.responses.create({
       model,
       max_output_tokens: getMaxOutputTokens(),
+      ...(newsDomains.length ? { reasoning: { effort: "none" as const } } : {}),
       instructions: `
 You are MuniGPT, a public-records research assistant for ${municipality.name}.
 
@@ -188,7 +190,7 @@ Rules:
     });
 
     const { answer, citations, newsSearched } = extractCitedAnswer(response, newsDomains.length > 0);
-    const usage = extractChatUsage(response);
+    const usage = extractChatUsage(response, model);
 
     await logUsageEvent({
       municipalityId: municipality.id,

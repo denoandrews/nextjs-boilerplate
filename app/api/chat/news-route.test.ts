@@ -19,6 +19,8 @@ describe("newspaper search request flow", () => {
     expect(response.status).toBe(200);
     expect(body.answer).toBe("News [News 1]");
     expect(body.newsSearched).toBe(true);
+    expect(mocks.create.mock.calls[0][0].model).toBe("gpt-5.4-mini");
+    expect(mocks.create.mock.calls[0][0].reasoning).toEqual({ effort: "none" });
     expect(body.citations[0].url).toBe("https://www.oakpark.com/story");
     expect(mocks.create.mock.calls[0][0].tools).toContainEqual(expect.objectContaining({ type: "web_search", external_web_access: true, filters: { allowed_domains: ["oakpark.com", "chicagotribune.com"] } }));
     expect(mocks.log.mock.calls[0][0].citations).toEqual(body.citations);
