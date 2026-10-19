@@ -130,6 +130,35 @@ await openai.vectorStores.files.update(vectorStoreId, fileId, {
 
 For files already tracked in Supabase, set `documents.external_url` as well. The chat route uses that URL before a filename guess. Suggested labels for the records that produced weak answers: mark a real draft zoning text `status=draft` (the April 3, 2026 revision of the 2017 zoning ordinance is adopted, not a draft); mark the 2020 remedial-action plan `document_type=study` so it is not treated as a FOIA, noise, or parking source; set `record_date` and `source_url` on minutes and agendas, including the October 13, 2026 agenda and the May 6, 2025 minutes. Add a metadata filter only after those attributes exist. File search currently returns 16 results and does not sort by filename date.
 
+## Tag vector store files
+
+`npm run tag-vector-store` proposes attributes for files already in an OpenAI vector store. It does not change chat search, and it does not upload or delete files. Dry run is the default: it lists the store, reads each filename, and writes a CSV. It reads document text only when the filename has no `YYYY-MM-DD`. A second run reuses `.vector-store-tag-cache/` so those files are not downloaded again. The CSV uses a numeric `record_date` (`20261013`) and leaves `status` blank unless the evidence is clear. That is the schema this script writes. Chat search still ignores these attributes.
+
+The CSV columns are `file_id`, `filename`, `city`, `source_url`, `record_date`, `document_type`, `status`, `title`, `date_source`, `confidence`, `needs_review`, and `notes`. `record_date` is an 8-digit number such as `20261013` when a full day was found. `date_source` is `filename`, `content`, or `none`. `status` is left blank unless the name says draft or superseded, or an older budget book is clearly superseded by a newer one. Rows with `needs_review` of `yes` are guesses for a person to check.
+
+Set the Oak Park key, store, and slug, then review the CSV. Optional Supabase settings fill `source_url` from `documents.external_url` when those rows exist.
+
+```bash
+export OPENAI_API_KEY="sk-..."
+export VECTOR_STORE_ID="vs_..."
+export MUNICIPALITY_SLUG="oak-park-il"
+# optional
+export SUPABASE_URL="https://YOUR_PROJECT.supabase.co"
+export SUPABASE_SERVICE_ROLE_KEY="..."
+
+npm run tag-vector-store -- --out oak-park-tags.csv
+```
+
+Open `oak-park-tags.csv`. Correct any date, type, status, title, or URL. For each row that should be written, set `needs_review` to `no`. Leave `yes` on a row to skip it. A cleared row still needs a `document_type`. Blank `status` and blank `record_date` are allowed and are omitted from the update.
+
+This command is the only one that writes. It calls the vector store file update endpoint with attributes and nothing else. Each update or skip is printed and appended to `oak-park-tags.csv.apply.log`.
+
+```bash
+npm run tag-vector-store -- --apply oak-park-tags.csv
+```
+
+`--delay-ms 200` is the pause between API calls. `--refresh` ignores the text cache. `--limit 20` scans a short sample; do not treat that CSV as the full store. The same commands work for a later city by changing `MUNICIPALITY_SLUG` and `VECTOR_STORE_ID`.
+
 ## Still required before selling
 
 - Provision the production Supabase project and apply the migration.
