@@ -489,13 +489,36 @@ td {
     height: auto;
   }
 
-  .composer-row {
+  .chat-card:not(.chat-card-compact) .composer-row {
     align-items: stretch;
     flex-direction: column;
   }
 
   .admin-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 300px) {
+  .chat-card-compact .composer-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+@media (max-height: 520px) {
+  .chat-card-compact .eyebrow,
+  .chat-card-compact .chat-news {
+    display: none;
+  }
+
+  .chat-card-compact .chat-header,
+  .chat-card-compact .composer {
+    padding: 8px 12px;
+  }
+
+  .chat-card-compact .chat-header h1 {
+    font-size: 1.05rem;
   }
 }
 

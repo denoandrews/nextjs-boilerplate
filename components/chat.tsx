@@ -70,6 +70,7 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
   const [ready, setReady] = useState(false);
   const conversationId = useRef<string | undefined>(undefined);
   const inputRef = useRef<HTMLInputElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const aliveRef = useRef(true);
 
@@ -87,6 +88,12 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
     if (!ready) return;
     writeSnapshot(municipalitySlug, messages, conversationId.current, municipality);
   }, [ready, messages, municipality, municipalitySlug]);
+
+  useEffect(() => {
+    const node = messagesRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [messages, busy]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -179,11 +186,11 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
         <h1 id="munigpt-title">
           {municipality === "MuniGPT" ? municipality : `${municipality} MuniGPT`}
         </h1>
-        <p>Informational only. Verify answers against the cited official records.</p>
-        {municipalitySlug === "oak-park-il" ? <p>News search: Wednesday Journal and Chicago Tribune. Article availability may be limited by access restrictions.</p> : null}
+        <p className="chat-note">Informational only. Verify answers against the cited official records.</p>
+        {municipalitySlug === "oak-park-il" ? <p className="chat-news">News search: Wednesday Journal and Chicago Tribune. Article availability may be limited by access restrictions.</p> : null}
       </header>
 
-      <div className="messages" aria-live="polite" aria-busy={busy}>
+      <div className="messages" ref={messagesRef} aria-live="polite" aria-busy={busy}>
         {messages.map((message, index) => {
           const previousQuestion = [...messages.slice(0, index + 1)].reverse().find((item) => item.role === "user");
           const labels = sourceLabels(uiLocale(`${previousQuestion?.text ?? ""} ${message.text}`));
@@ -223,7 +230,7 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
       </div>
 
       <form className="composer" onSubmit={send}>
-        <label htmlFor="munigpt-question">Ask a question</label>
+        <label htmlFor="munigpt-question" className={compact ? "sr-only" : undefined}>Ask a question</label>
         <div className="composer-row">
           <input
             id="munigpt-question"
