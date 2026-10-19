@@ -43,7 +43,7 @@ const OAK_PARK_PAGES: OfficialPage[] = [
     title: "Village Board agendas, minutes, and videos",
     url: OAK_PARK_MEETINGS_URL,
     useWhen:
-      "Use for the next or latest Village Board meeting, agendas, minutes, and videos. If the records do not contain a future meeting, say the latest date you found is in the past and give this page instead of guessing a date.",
+      "Use for the next or latest Village Board meeting, agendas, minutes, and videos. If the records do not include a future meeting, say that in the first sentence, give the latest meeting as already passed, and give this page for the upcoming schedule. Do not present a past meeting, including October 13, 2026 on a later day, as the next meeting.",
   },
   {
     title: "Village Board and trustees",
@@ -66,7 +66,7 @@ const OAK_PARK_PAGES: OfficialPage[] = [
     title: "Parking enforcement",
     url: "https://www.oak-park.us/Services-Parking/Parking-Mobility-Services/Parking-Enforcement",
     useWhen:
-      "Use for a parking ticket, how to pay or contest one, and the parking-enforcement contact. Parking fines are collected by the Office of Adjudication, not by the permits desk. Lakeshore Recycling Systems is the waste hauler and is not a parking provider.",
+      "Use for a parking ticket, how to pay or contest one, and the parking-enforcement contact. Parking fines are collected by the Office of Adjudication, not by the permits desk. Lakeshore Recycling Systems is the waste hauler and is not a parking provider. A parking-services request for proposal or other vendor proposal is not the current payment policy and may be outdated.",
   },
   {
     title: "Office of Adjudication",
@@ -90,6 +90,12 @@ const OAK_PARK_PAGES: OfficialPage[] = [
     url: "https://www.lrsrecycles.com/municipality/oak-park/",
     useWhen:
       "Share this with the Village garbage page when someone needs their own pickup day or needs to report a missed pickup. Lakeshore Recycling Systems is the waste and recycling hauler only. Never describe it as the parking provider or send a parking-ticket question here.",
+  },
+  {
+    title: "Building permits",
+    url: "https://www.oak-park.us/Building-Business/Building-Permits",
+    useWhen:
+      "Use for sheds, garages, decks, fences, and other construction permits, and for where current permit fees are published. A vendor proposal, bid, or request for proposal is not the current fee schedule and may be outdated. Prefer this page over an older proposal.",
   },
   {
     title: "Zoning",
@@ -117,7 +123,7 @@ const OAK_PARK_PAGES: OfficialPage[] = [
     title: "FY2026 budget book",
     url: "https://www.oak-park.us/files/assets/oakpark/v/2/finance/budgets/fy26-budget-book-final.pdf",
     useWhen:
-      "Use for budget figures. If asked for the general fund, give the general fund total only when the source states that total. A property tax levy, including $19,125,000, is not the general fund budget. If you only find the levy, say in the first sentence that it is the property tax levy and not the general fund budget.",
+      "Use for budget figures. If asked for the general fund, state the FY2026 general fund total of $114,695,709. A property tax levy is not the general fund budget. The $19,125,000 levy is separate; mention it in one later sentence only, and do not open with it unless the user or an earlier turn mentions that levy.",
   },
 ];
 
@@ -148,6 +154,7 @@ const OAK_PARK_MENTIONS: { source: string; url: string }[] = [
   { source: "(?:FY ?2026 |the )?budget book", url: "https://www.oak-park.us/files/assets/oakpark/v/2/finance/budgets/fy26-budget-book-final.pdf" },
   { source: "Village Code", url: "https://codelibrary.amlegal.com/codes/oakparkil/latest/overview" },
   { source: "meetings page", url: OAK_PARK_MEETINGS_URL },
+  { source: "building permits page", url: "https://www.oak-park.us/Building-Business/Building-Permits" },
 ];
 
 export function officialPages(slug: string): OfficialPage[] {
@@ -157,6 +164,14 @@ export function officialPages(slug: string): OfficialPage[] {
 export function officialMentions(slug: string): { pattern: RegExp; url: string }[] {
   if (slug !== "oak-park-il") return [];
   return OAK_PARK_MENTIONS.map((mention) => ({ pattern: new RegExp(mention.source, "gi"), url: mention.url }));
+}
+
+/** Procurement files and unrelated studies are not shown as answer sources. */
+export function excludedCitationFilename(filename: string): boolean {
+  const spaced = filename.replace(/[_./-]+/g, " ");
+  return /remedial\s+action\s+plan/i.test(spaced)
+    || /\brfp\b/i.test(spaced)
+    || /request\s+for\s+proposal/i.test(spaced);
 }
 
 export function citationSourceNote(url: string | null | undefined, slug?: string): "meetings" | null {

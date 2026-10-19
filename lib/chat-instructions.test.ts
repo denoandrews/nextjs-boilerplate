@@ -31,6 +31,11 @@ describe("municipal clock and instructions", () => {
     expect(instructions).toContain("language of the latest user question");
     expect(instructions).toContain("previous question was Spanish");
     expect(instructions).toContain("put its exact URL");
+    expect(instructions).toContain("Language for this turn: English.");
+    expect(instructions).toContain("$114,695,709");
+    expect(instructions).toContain("records do not include a future meeting");
+    expect(instructions).toContain("vendor proposal");
+    expect(instructions).toContain("https://www.oak-park.us/Building-Business/Building-Permits");
     expect(instructions).toContain("pickup day");
     expect(instructions).toContain("2020 Remedial Action Plan");
     expect(instructions).toContain("2017-09-18 agenda is older than a 2026-10-13 agenda");
@@ -43,6 +48,18 @@ describe("municipal clock and instructions", () => {
     expect(instructions).toContain("You do not have a weather tool");
     expect(instructions).toContain("https://www.oak-park.us/Services-Parking/Waste-Recycling/Garbage-Collection");
     expect(instructions).toContain("Oak Park, Illinois");
+  });
+
+  it("names Spanish when the latest question is Spanish", () => {
+    const instructions = buildChatInstructions({
+      municipalityName: "Village of Oak Park",
+      slug: "oak-park-il",
+      newsEnabled: true,
+      question: "[TEST] ¿Cómo pago una multa de estacionamiento?",
+    });
+    expect(instructions).toContain("Language for this turn: Spanish.");
+    expect(instructions).toContain("Write every sentence of the answer in Spanish.");
+    expect(instructions).not.toContain("Language for this turn: English.");
   });
 
   it("does not give another municipality Oak Park's pages", () => {

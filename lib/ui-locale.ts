@@ -15,6 +15,17 @@ export function turnLocale(question: string | undefined, messageText = ""): UiLo
   return uiLocale(current || messageText);
 }
 
+export function answerLanguageName(question: string): "Spanish" | "English" {
+  return uiLocale(question) === "es" ? "Spanish" : "English";
+}
+
+/** Stated on the turn itself so earlier messages cannot choose the answer language. */
+export function turnLanguageDirective(question: string): string {
+  const language = answerLanguageName(question);
+  const other = language === "Spanish" ? "English" : "Spanish";
+  return `Language for this turn: ${language}. The latest user question is in ${language}. Write every sentence of the answer in ${language}. Do not write the answer in ${other}.`;
+}
+
 export function sourceLabels(locale: UiLocale) {
   if (locale === "es") {
     return {

@@ -3,6 +3,7 @@ import {
   allowedAnswerUrl,
   citationSourceNote,
   citationUrlForFile,
+  excludedCitationFilename,
   officialPages,
   safeHttpsUrl,
   withStoredSourceUrls,
@@ -49,5 +50,9 @@ describe("official source links", () => {
     expect(citationUrlForFile({ slug: "strawberry-point-ia", filename: "Minutes - 2025-05-06.pdf" })).toBeNull();
     expect(citationSourceNote(meetings, "oak-park-il")).toBe("meetings");
     expect(citationSourceNote("https://www.oak-park.us/files/assets/oakpark/v/2/finance/budgets/fy26-budget-book-final.pdf", "oak-park-il")).toBeNull();
+    expect(excludedCitationFilename("2020-05-18_VillageBoard__24_2_-Remedial_Action_Plan.pdf")).toBe(true);
+    expect(excludedCitationFilename("2018 Parking Services RFP.pdf")).toBe(true);
+    expect(excludedCitationFilename("Request for Proposal - parking.pdf")).toBe(true);
+    expect(excludedCitationFilename("Minutes - 2025-05-06 Village Board.pdf")).toBe(false);
   });
 });

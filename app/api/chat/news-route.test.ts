@@ -31,13 +31,27 @@ describe("newspaper search request flow", () => {
     expect(mocks.create.mock.calls[0][0].include).toEqual(["file_search_call.results"]);
     expect(mocks.create.mock.calls[0][0].instructions).toContain("America/Chicago");
     expect(mocks.create.mock.calls[0][0].instructions).toContain("in the past");
+    expect(mocks.create.mock.calls[0][0].instructions).toContain("Language for this turn: English.");
     expect(mocks.create.mock.calls[0][0].instructions).toContain("You do not have a weather tool");
+    expect(mocks.create.mock.calls[0][0].input.at(-2)).toEqual({
+      role: "developer",
+      content: expect.stringContaining("Language for this turn: English."),
+    });
     expect(mocks.create.mock.calls[0][0].instructions).toContain("https://www.oak-park.us/Government/Information-and-Resources/Freedom-of-Information-Act-FOIA");
     expect(mocks.client).toHaveBeenCalledWith(expect.objectContaining({ timeout: 50_000, maxRetries: 0 }));
     expect(mocks.create.mock.calls[0][0].reasoning).toEqual({ effort: "none" });
     expect(body.citations[0].url).toBe("https://www.oakpark.com/story");
     expect(mocks.create.mock.calls[0][0].tools).toContainEqual(expect.objectContaining({ type: "web_search", external_web_access: true, filters: { allowed_domains: ["oakpark.com", "chicagotribune.com"] } }));
     expect(mocks.log.mock.calls[0][0].citations).toEqual(body.citations);
+  });
+  it("tells the model the latest question is Spanish", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-only");
+    mocks.config.mockResolvedValue({ id: "oak", slug: "oak-park-il", name: "Oak Park", vectorStoreIds: ["vs-oak"] });
+    mocks.create.mockResolvedValue({ output: [{ type: "message", content: [{ type: "output_text", text: "Pague en línea.", annotations: [] }] }] });
+    await POST(new Request("https://app.test/api/chat", { method: "POST", body: JSON.stringify({ message: "[TEST] ¿Cómo pago una multa de estacionamiento?", municipalitySlug: "oak-park-il" }) }));
+    expect(mocks.create.mock.calls[0][0].instructions).toContain("Language for this turn: Spanish.");
+    expect(mocks.create.mock.calls[0][0].input.at(-2).content).toContain("Write every sentence of the answer in Spanish.");
+    expect(mocks.create.mock.calls[0][0].input.at(-1)).toEqual({ role: "user", content: "[TEST] ¿Cómo pago una multa de estacionamiento?" });
   });
   it("keeps Strawberry Point restricted to its own document search", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-only");

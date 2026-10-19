@@ -1,5 +1,5 @@
 import type OpenAI from "openai";
-import { allowedAnswerUrl, citationUrlForFile, officialMentions, safeHttpsUrl } from "@/lib/source-links";
+import { allowedAnswerUrl, citationUrlForFile, excludedCitationFilename, officialMentions, safeHttpsUrl } from "@/lib/source-links";
 import { uiLocale } from "@/lib/ui-locale";
 
 const NEWSPAPER_DOMAINS = ["oakpark.com", "chicagotribune.com"];
@@ -163,6 +163,7 @@ export function extractCitedAnswer(
       for (const annotation of content.annotations) {
         if (annotation.type === "file_citation") {
           if (Number.isInteger(annotation.index)) fileIndexes.push(annotation.index);
+          if (excludedCitationFilename(annotation.filename)) continue;
           const url = citationUrlForFile({
             slug: options?.slug,
             filename: annotation.filename,

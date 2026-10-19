@@ -77,6 +77,13 @@ describe("Oak Park newspaper search", () => {
     ), false);
     expect(extracted.answer).toBe("Final sentence.");
   });
+  it("drops a remedial-action plan from the displayed citations", () => {
+    const result = extractCitedAnswer(response("Quiet hours are in the Village Code.", [
+      { type: "file_citation", file_id: "file-rap", filename: "2020-05-18_VillageBoard__24_2_-Remedial_Action_Plan.pdf", index: 10 },
+      { type: "file_citation", file_id: "file-code", filename: "village-code.pdf", index: 20 },
+    ]), false);
+    expect(result.citations.map((citation) => citation.filename)).toEqual(["village-code.pdf"]);
+  });
   it("links a file from metadata, then from a known filename", () => {
     const withAttribute = extractCitedAnswer({
       output: [
