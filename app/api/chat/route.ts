@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { clarifyLevyAnswer } from "@/lib/answer-quality";
 import { newspaperDomains, extractCitedAnswer } from "@/lib/news-search";
 import { buildChatInstructions, getMaxOutputTokens } from "@/lib/chat-instructions";
+import { turnLanguageDirective } from "@/lib/ui-locale";
 import { OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT_MS, requestTimedOut } from "@/lib/chat-request";
 import { reserveChatQuery } from "@/lib/chat-limits";
 import { logChatExchange } from "@/lib/chat-logging";
@@ -71,6 +72,7 @@ function buildInput(history: HistoryMessage[], userText: string) {
       role: message.role,
       content: message.content,
     })),
+    { role: "developer" as const, content: turnLanguageDirective(userText) },
     { role: "user" as const, content: userText },
   ];
 }
@@ -163,6 +165,7 @@ export async function POST(req: Request) {
           municipalityName: municipality.name,
           slug: municipality.slug,
           newsEnabled: newsDomains.length > 0,
+          question: message,
         }),
         input: buildInput(history, message),
         include: ["file_search_call.results"],
@@ -199,7 +202,8 @@ export async function POST(req: Request) {
       ...usage,
     });
 
-    const finalAnswer = clarifyLevyAnswer(message, answer) || "I could not establish an answer from the available records.";
+    const historyText = history.map((item) => item.content).join("\n");
+    const finalAnswer = clarifyLevyAnswer(message, answer, historyText) || "I could not establish an answer from the available records.";
     const conversationId =
       typeof body.conversationId === "string" ? body.conversationId.slice(0, 80) : undefined;
     const logged = await logChatExchange({

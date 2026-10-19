@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sourceLabels, turnLocale, uiLocale } from "./ui-locale";
+import { sourceLabels, turnLanguageDirective, turnLocale, uiLocale } from "./ui-locale";
 
 describe("source labels", () => {
   it("keeps English chrome for an English question", () => {
@@ -16,6 +16,11 @@ describe("source labels", () => {
       document: "Documento",
       news: "Noticia",
     });
+  });
+
+  it("states the latest question's language for the model", () => {
+    expect(turnLanguageDirective("[TEST] ¿Cómo pago una multa de estacionamiento?")).toContain("Language for this turn: Spanish.");
+    expect(turnLanguageDirective("What is the general fund budget?")).toContain("Language for this turn: English.");
   });
 
   it("follows the current English question when the answer is still in Spanish", () => {
