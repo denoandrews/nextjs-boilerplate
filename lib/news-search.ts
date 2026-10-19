@@ -1,5 +1,6 @@
 import type OpenAI from "openai";
 import { allowedAnswerUrl, citationUrlForFile, safeHttpsUrl } from "@/lib/source-links";
+import { uiLocale } from "@/lib/ui-locale";
 
 const NEWSPAPER_DOMAINS = ["oakpark.com", "chicagotribune.com"];
 
@@ -60,14 +61,8 @@ function fileAttributeUrls(response: OpenAI.Responses.Response) {
   return urls;
 }
 
-function looksSpanish(answer: string) {
-  if (/[¿¡ñÑ]/.test(answer)) return true;
-  const hits = answer.match(/\b(el|la|los|las|que|para|como|cómo|una|ordenanza)\b/gi);
-  return (hits?.length ?? 0) >= 2;
-}
-
 function clippedNote(answer: string) {
-  return looksSpanish(answer)
+  return uiLocale(answer) === "es"
     ? "El resto de la respuesta se cortó. Pide una continuación si necesitas más."
     : "The rest of this answer was cut off. Ask a follow-up if you need more.";
 }
