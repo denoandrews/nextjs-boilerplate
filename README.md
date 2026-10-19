@@ -87,6 +87,7 @@ Example embed:
 - The server, not the browser, selects the vector stores.
 - Citations are extracted from API response annotations rather than generated as plain text. A citation is a link when a URL is known from `documents.external_url`, a vector-store file attribute (`source_url`, `url`, or `external_url`), or a filename mapping. Oak Park answers may also share a fixed list of official pages.
 - Questions and submitted conversation history are length-limited.
+- The widget keeps the visible conversation in `sessionStorage` for the browser tab. Reloading that tab restores it. Closing the tab clears it. The anonymous rate-limit id stays in `localStorage`, separate from the transcript.
 - Answers have a hard output-token ceiling (800 by default, 1,600 for gpt-5 models). An answer cut off by that ceiling is closed at the last complete sentence when possible and says it was cut off.
 - Each OpenAI call uses a 50 second timeout and no automatic retries, and the route asks the platform to stop the function at 60 seconds.
 - Atomic per-municipality monthly quotas prevent concurrent requests from exceeding the configured allowance.
