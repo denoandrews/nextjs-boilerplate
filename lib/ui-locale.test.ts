@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sourceLabels, uiLocale } from "./ui-locale";
+import { sourceLabels, turnLocale, uiLocale } from "./ui-locale";
 
 describe("source labels", () => {
   it("keeps English chrome for an English question", () => {
@@ -16,5 +16,10 @@ describe("source labels", () => {
       document: "Documento",
       news: "Noticia",
     });
+  });
+
+  it("follows the current English question when the answer is still in Spanish", () => {
+    expect(turnLocale("Does a fence need a permit?", "Se requiere un permiso de acuerdo con las reglas.")).toBe("en");
+    expect(turnLocale("¿Se necesita un permiso para una cerca?", "A permit is required.")).toBe("es");
   });
 });

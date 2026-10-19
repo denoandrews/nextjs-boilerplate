@@ -117,7 +117,7 @@ const OAK_PARK_PAGES: OfficialPage[] = [
     title: "FY2026 budget book",
     url: "https://www.oak-park.us/files/assets/oakpark/v/2/finance/budgets/fy26-budget-book-final.pdf",
     useWhen:
-      "Use for budget figures. If asked for the general fund, give the general fund figure when the source states it. A property tax levy is not the general fund. If the source only states a levy, say so and do not present that levy as the general fund.",
+      "Use for budget figures. If asked for the general fund, give the general fund total only when the source states that total. A property tax levy, including $19,125,000, is not the general fund budget. If you only find the levy, say in the first sentence that it is the property tax levy and not the general fund budget.",
   },
 ];
 
@@ -138,8 +138,30 @@ const OAK_PARK_FILENAME_LINKS: FilenameLink[] = [
 
 const OAK_PARK_HOSTS = ["oak-park.us", "lrsrecycles.com", "codelibrary.amlegal.com"];
 
+const OAK_PARK_MENTIONS: { source: string; url: string }[] = [
+  { source: "garbage collection page", url: "https://www.oak-park.us/Services-Parking/Waste-Recycling/Garbage-Collection" },
+  { source: "Lakeshore Recycling Systems(?: Oak Park)? page", url: "https://www.lrsrecycles.com/municipality/oak-park/" },
+  { source: "parking enforcement page", url: "https://www.oak-park.us/Services-Parking/Parking-Mobility-Services/Parking-Enforcement" },
+  { source: "parking permits page", url: "https://www.oak-park.us/Services-Parking/Parking-Mobility-Services/Parking-Permits" },
+  { source: "(?:FOIA|Freedom of Information Act) page", url: "https://www.oak-park.us/Government/Information-and-Resources/Freedom-of-Information-Act-FOIA" },
+  { source: "fence guidelines", url: "https://www.oak-park.us/files/assets/oakpark/v/1/development-services/permits/fence-guidelines-2025-08.pdf" },
+  { source: "(?:FY ?2026 |the )?budget book", url: "https://www.oak-park.us/files/assets/oakpark/v/2/finance/budgets/fy26-budget-book-final.pdf" },
+  { source: "Village Code", url: "https://codelibrary.amlegal.com/codes/oakparkil/latest/overview" },
+  { source: "meetings page", url: OAK_PARK_MEETINGS_URL },
+];
+
 export function officialPages(slug: string): OfficialPage[] {
   return slug === "oak-park-il" ? OAK_PARK_PAGES : [];
+}
+
+export function officialMentions(slug: string): { pattern: RegExp; url: string }[] {
+  if (slug !== "oak-park-il") return [];
+  return OAK_PARK_MENTIONS.map((mention) => ({ pattern: new RegExp(mention.source, "gi"), url: mention.url }));
+}
+
+export function citationSourceNote(url: string | null | undefined, slug?: string): "meetings" | null {
+  if (slug !== "oak-park-il" || !url) return null;
+  return url === OAK_PARK_MEETINGS_URL ? "meetings" : null;
 }
 
 export function linkHosts(slug: string): string[] {

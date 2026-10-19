@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { clarifyLevyAnswer } from "@/lib/answer-quality";
 import { newspaperDomains, extractCitedAnswer } from "@/lib/news-search";
 import { buildChatInstructions, getMaxOutputTokens } from "@/lib/chat-instructions";
 import { OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT_MS, requestTimedOut } from "@/lib/chat-request";
@@ -198,7 +199,7 @@ export async function POST(req: Request) {
       ...usage,
     });
 
-    const finalAnswer = answer || "I could not establish an answer from the available records.";
+    const finalAnswer = clarifyLevyAnswer(message, answer) || "I could not establish an answer from the available records.";
     const conversationId =
       typeof body.conversationId === "string" ? body.conversationId.slice(0, 80) : undefined;
     const logged = await logChatExchange({

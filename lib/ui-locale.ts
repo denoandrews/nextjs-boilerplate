@@ -9,6 +9,12 @@ export function uiLocale(text: string): UiLocale {
   return (hits?.length ?? 0) >= 2 ? "es" : "en";
 }
 
+/** Labels follow the current question, not an earlier turn or a mismatched answer. */
+export function turnLocale(question: string | undefined, messageText = ""): UiLocale {
+  const current = question?.trim();
+  return uiLocale(current || messageText);
+}
+
 export function sourceLabels(locale: UiLocale) {
   if (locale === "es") {
     return {
@@ -17,6 +23,9 @@ export function sourceLabels(locale: UiLocale) {
       news: "Noticia",
       tryAgain: "Intentar de nuevo",
       you: "Tú",
+      newChat: "Nuevo chat",
+      meetingsPage: "página de reuniones",
+      meetingsPageTitle: "Abre la página de reuniones del Village Board, no el PDF.",
     };
   }
   return {
@@ -25,5 +34,8 @@ export function sourceLabels(locale: UiLocale) {
     news: "News",
     tryAgain: "Try again",
     you: "You",
+    newChat: "New chat",
+    meetingsPage: "meetings page",
+    meetingsPageTitle: "Opens the Village Board meetings page, not this PDF.",
   };
 }
