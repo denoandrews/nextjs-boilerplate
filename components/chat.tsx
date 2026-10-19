@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useRef, useState } from "react";
-import { approvedNewspaperUrl, splitNewsReferences, type ChatCitation } from "@/lib/news-search";
+import { answerSegments, approvedNewspaperUrl, type ChatCitation } from "@/lib/news-search";
+import { safeHttpsUrl } from "@/lib/source-links";
 
 type Role = "user" | "assistant";
 type Citation = ChatCitation;
@@ -102,21 +103,24 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
         {messages.map((message, index) => (
           <article className={`message message-${message.role}`} key={`${message.role}-${index}`}>
             <span className="message-label">{message.role === "user" ? "You" : "MuniGPT"}</span>
-            <p>{splitNewsReferences(message.text, message.citations).map((part, partIndex) =>
-              part.citation?.url ? <a key={partIndex} href={part.citation.url} target="_blank" rel="noopener noreferrer" aria-label={`News source: ${part.citation.filename}`}>{part.text}</a> : part.text
+            <p>{answerSegments(message.text, message.citations, municipalitySlug).map((part, partIndex) =>
+              part.href ? <a key={partIndex} href={part.href} target="_blank" rel="noopener noreferrer">{part.text}</a> : part.text
             )}</p>
             {message.newsSearched ? <p className="status">Searched the approved newspapers. News reporting is a secondary source.</p> : null}
             {message.citations?.length ? (
               <div className="sources" aria-label="Sources">
                 <strong>Sources</strong>
                 <ul>
-                  {message.citations.map((citation) => (
-                    <li key={citation.fileId}>
-                      {citation.url && approvedNewspaperUrl(citation.url) ? (
-                        <><span>News: </span><a href={citation.url} target="_blank" rel="noopener noreferrer">{citation.filename}</a></>
-                      ) : <><span>Document: </span>{citation.filename}</>}
-                    </li>
-                  ))}
+                  {message.citations.map((citation) => {
+                    const href = citation.url ? safeHttpsUrl(citation.url) : null;
+                    const news = href ? approvedNewspaperUrl(href) : null;
+                    return (
+                      <li key={citation.fileId}>
+                        <span>{news ? "News: " : "Document: "}</span>
+                        {href ? <a href={href} target="_blank" rel="noopener noreferrer">{citation.filename}</a> : citation.filename}
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             ) : null}

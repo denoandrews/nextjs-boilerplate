@@ -3,7 +3,7 @@ import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isSupabaseAdminConfigured } from "@/lib/supabase/config";
 
-type Citation = { fileId: string; filename: string };
+type Citation = { fileId: string; filename: string; url?: string };
 
 type ChatLog = {
   municipalityId: string | null;
@@ -73,6 +73,7 @@ export async function logChatExchange(input: ChatLog): Promise<{ conversationId?
           file_id: citation.fileId,
           filename: citation.filename,
           ordinal: index + 1,
+          metadata: citation.url ? { url: citation.url } : {},
         }))
       );
       if (citationsError) throw citationsError;

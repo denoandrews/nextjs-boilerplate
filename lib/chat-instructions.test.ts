@@ -1,0 +1,55 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildChatInstructions, getMaxOutputTokens, municipalClock, timeZoneForSlug } from "./chat-instructions";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+describe("municipal clock and instructions", () => {
+  it("uses the America/Chicago calendar date, including before UTC midnight", () => {
+    expect(timeZoneForSlug("oak-park-il")).toBe("America/Chicago");
+    const clock = municipalClock("America/Chicago", new Date("2026-10-19T03:30:00.000Z"));
+    expect(clock.iso).toBe("2026-10-18");
+    expect(clock.label).toBe("Sunday, October 18, 2026");
+  });
+
+  it("tells Oak Park the date, how to rank records, and not to invent a weather tool", () => {
+    const instructions = buildChatInstructions({
+      municipalityName: "Village of Oak Park",
+      slug: "oak-park-il",
+      newsEnabled: true,
+      now: new Date("2026-10-19T18:00:00.000Z"),
+    });
+    expect(instructions).toContain("Monday, October 19, 2026");
+    expect(instructions).toContain("America/Chicago");
+    expect(instructions).toContain("in the past");
+    expect(instructions).toContain("Do not open with Yes or No");
+    expect(instructions).toContain("general fund");
+    expect(instructions).toContain("pickup day");
+    expect(instructions).toContain("remedial-action report");
+    expect(instructions).toContain("You do not have a weather tool");
+    expect(instructions).toContain("https://www.oak-park.us/Services-Parking/Waste-Recycling/Garbage-Collection");
+    expect(instructions).toContain("Oak Park, Illinois");
+  });
+
+  it("does not give another municipality Oak Park's pages", () => {
+    const instructions = buildChatInstructions({
+      municipalityName: "Strawberry Point",
+      slug: "strawberry-point-ia",
+      newsEnabled: false,
+      now: new Date("2026-10-19T18:00:00.000Z"),
+    });
+    expect(instructions).toContain("America/Chicago");
+    expect(instructions).not.toContain("oak-park.us");
+    expect(instructions).not.toContain("Wednesday Journal");
+  });
+
+  it("gives reasoning models a higher default output budget", () => {
+    expect(getMaxOutputTokens("gpt-4.1-mini")).toBe(800);
+    expect(getMaxOutputTokens("gpt-5.4-mini")).toBe(1600);
+    vi.stubEnv("OPENAI_MAX_OUTPUT_TOKENS", "500");
+    expect(getMaxOutputTokens("gpt-5.4-mini")).toBe(500);
+    vi.stubEnv("OPENAI_MAX_OUTPUT_TOKENS", "9000");
+    expect(getMaxOutputTokens("gpt-4.1-mini")).toBe(2000);
+  });
+});
