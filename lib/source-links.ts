@@ -8,8 +8,10 @@
  * 4. an https URL embedded in the filename on an allowlisted host
  *
  * Production files were not modified. Until attributes and `external_url` are
- * filled in, most packet PDFs stay plain text and the assistant shares the
- * official pages listed for the municipality instead.
+ * filled in, most packet PDFs stay plain text. Agenda and minutes filenames
+ * link to the Village Board meetings page. A remedial-action plan is left
+ * unlinked on purpose. The assistant also shares the official pages listed
+ * for the municipality.
  *
  * Recommended follow-up (do not re-upload or delete the production store):
  * set attributes in place with `vectorStores.files.update`:
@@ -34,10 +36,12 @@ type FilenameLink = {
   url: string;
 };
 
+const OAK_PARK_MEETINGS_URL = "https://www.oak-park.us/Government/Meetings/Village-Board-Agendas-Minutes-Videos";
+
 const OAK_PARK_PAGES: OfficialPage[] = [
   {
     title: "Village Board agendas, minutes, and videos",
-    url: "https://www.oak-park.us/Government/Meetings/Village-Board-Agendas-Minutes-Videos",
+    url: OAK_PARK_MEETINGS_URL,
     useWhen:
       "Use for the next or latest Village Board meeting, agendas, minutes, and videos. If the records do not contain a future meeting, say the latest date you found is in the past and give this page instead of guessing a date.",
   },
@@ -55,7 +59,20 @@ const OAK_PARK_PAGES: OfficialPage[] = [
   {
     title: "Parking permits",
     url: "https://www.oak-park.us/Services-Parking/Parking-Mobility-Services/Parking-Permits",
-    useWhen: "Use for parking permits, where to get them, and parking services.",
+    useWhen:
+      "Use only for parking permits, permit maps, and vehicle licenses. Do not use this page for a parking ticket, a fine, or how to pay or contest a citation.",
+  },
+  {
+    title: "Parking enforcement",
+    url: "https://www.oak-park.us/Services-Parking/Parking-Mobility-Services/Parking-Enforcement",
+    useWhen:
+      "Use for a parking ticket, how to pay or contest one, and the parking-enforcement contact. Parking fines are collected by the Office of Adjudication, not by the permits desk. Lakeshore Recycling Systems is the waste hauler and is not a parking provider.",
+  },
+  {
+    title: "Office of Adjudication",
+    url: "https://www.oak-park.us/Government/Departments/Office-of-Adjudication",
+    useWhen:
+      "Use for contesting a parking ticket or other municipal citation and for how fines are collected. Do not send a ticket question to the parking permits page.",
   },
   {
     title: "Waste and recycling",
@@ -72,7 +89,7 @@ const OAK_PARK_PAGES: OfficialPage[] = [
     title: "Collection information from the Village hauler, Lakeshore Recycling Systems",
     url: "https://www.lrsrecycles.com/municipality/oak-park/",
     useWhen:
-      "Share this with the Village garbage page when someone needs their own pickup day or needs to report a missed pickup. Describe it as the hauler the Village lists, not as a Village ordinance.",
+      "Share this with the Village garbage page when someone needs their own pickup day or needs to report a missed pickup. Lakeshore Recycling Systems is the waste and recycling hauler only. Never describe it as the parking provider or send a parking-ticket question here.",
   },
   {
     title: "Zoning",
@@ -83,13 +100,13 @@ const OAK_PARK_PAGES: OfficialPage[] = [
     title: "Current zoning ordinance (adopted September 18, 2017; revised April 3, 2026)",
     url: "https://www.oak-park.us/files/assets/oakpark/v/3/development-services/planning/__2017-oak-park-zoning-ordinance-revised.04.03.2026x.pdf",
     useWhen:
-      "Prefer this over a file labeled DRAFT. A filename that starts with 2017 can still be this revised ordinance. Check the revision date before calling it outdated.",
+      "Prefer this over a file labeled DRAFT. This is the only 2017 filename that can still be current, and only because it was revised April 3, 2026. Do not apply that exception to agendas or minutes.",
   },
   {
     title: "Fence guidelines (August 2025)",
     url: "https://www.oak-park.us/files/assets/oakpark/v/1/development-services/permits/fence-guidelines-2025-08.pdf",
     useWhen:
-      "Prefer this for whether a fence needs a permit and for fence height and location rules when it is retrieved or when the question is about fence permits.",
+      "These August 2025 guidelines are the current fence rules. A permit is required, except for repair or replacement of existing fencing in a single or cumulative area not exceeding 100 square feet. Say that directly when asked whether a permit is required. Do not call a 2022 ordinance the current rule when these guidelines are available.",
   },
   {
     title: "Village Code",
@@ -100,7 +117,7 @@ const OAK_PARK_PAGES: OfficialPage[] = [
     title: "FY2026 budget book",
     url: "https://www.oak-park.us/files/assets/oakpark/v/2/finance/budgets/fy26-budget-book-final.pdf",
     useWhen:
-      "Use for budget figures. If asked for the general fund, give the general fund figure when the source separates it from the all-funds total.",
+      "Use for budget figures. If asked for the general fund, give the general fund figure when the source states it. A property tax levy is not the general fund. If the source only states a levy, say so and do not present that levy as the general fund.",
   },
 ];
 
@@ -151,10 +168,21 @@ export function allowedAnswerUrl(value: string, slug: string): string | null {
   return linkHosts(slug).some((domain) => hostMatches(hostname, domain)) ? href : null;
 }
 
+const OAK_PARK_FILENAME_FALLBACKS: FilenameLink[] = [
+  {
+    pattern: /(?:^|[^a-z])(?:agendas?|minutes)(?:[^a-z]|$)/i,
+    url: OAK_PARK_MEETINGS_URL,
+  },
+];
+
+function matchingFilenameUrl(filename: string, links: FilenameLink[]): string | null {
+  const link = links.find((entry) => entry.pattern.test(filename));
+  return link ? link.url : null;
+}
+
 export function filenameSourceUrl(slug: string | undefined, filename: string): string | null {
   if (slug !== "oak-park-il") return null;
-  const link = OAK_PARK_FILENAME_LINKS.find((entry) => entry.pattern.test(filename));
-  return link ? link.url : null;
+  return matchingFilenameUrl(filename, OAK_PARK_FILENAME_LINKS);
 }
 
 export function citationUrlForFile(input: {
@@ -172,8 +200,13 @@ export function citationUrlForFile(input: {
 
   if (!input.slug) return null;
   const embedded = input.filename.match(/https:\/\/[^\s<>"']+/i);
-  if (!embedded) return null;
-  return allowedAnswerUrl(embedded[0].replace(/[),.;]+$/g, ""), input.slug);
+  if (embedded) {
+    const fromEmbedded = allowedAnswerUrl(embedded[0].replace(/[),.;]+$/g, ""), input.slug);
+    if (fromEmbedded) return fromEmbedded;
+  }
+
+  if (input.slug !== "oak-park-il") return null;
+  return matchingFilenameUrl(input.filename, OAK_PARK_FILENAME_FALLBACKS);
 }
 
 export function withStoredSourceUrls<T extends { fileId: string; url?: string }>(

@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CHAT_CLIENT_TIMEOUT_MS } from "@/lib/chat-request";
 import { chatStorageKey, parseChatSnapshot, serializeChatSnapshot, type StoredMessage } from "@/lib/chat-session";
-import { answerSegments, approvedNewspaperUrl, type ChatCitation } from "@/lib/news-search";
+import { answerSegments, approvedNewspaperUrl, externalLinkProps, type ChatCitation } from "@/lib/news-search";
 import { safeHttpsUrl } from "@/lib/source-links";
 import { sourceLabels, uiLocale } from "@/lib/ui-locale";
 
@@ -198,7 +198,7 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
             <article className={`message message-${message.role}`} key={`${message.role}-${index}`}>
               <span className="message-label">{message.role === "user" ? labels.you : "MuniGPT"}</span>
               <p>{answerSegments(message.text, message.citations, municipalitySlug).map((part, partIndex) =>
-                part.href ? <a key={partIndex} href={part.href} target="_blank" rel="noopener noreferrer">{part.text}</a> : part.text
+                part.href ? <a key={partIndex} href={part.href} {...externalLinkProps(part.href)}>{part.text}</a> : part.text
               )}</p>
               {message.newsSearched ? <p className="status">Searched the approved newspapers. News reporting is a secondary source.</p> : null}
               {message.citations?.length ? (

@@ -37,4 +37,14 @@ describe("official source links", () => {
       filename: "packet https://www.oak-park.us/files/agenda.pdf",
     })).toBe("https://www.oak-park.us/files/agenda.pdf");
   });
+
+  it("links agenda and minutes filenames to the meetings page and leaves unrelated files plain", () => {
+    const meetings = "https://www.oak-park.us/Government/Meetings/Village-Board-Agendas-Minutes-Videos";
+    expect(citationUrlForFile({ slug: "oak-park-il", filename: "Minutes - 2025-05-06 Village Board.pdf" })).toBe(meetings);
+    expect(citationUrlForFile({ slug: "oak-park-il", filename: "2017-09-18 agenda.pdf" })).toBe(meetings);
+    expect(citationUrlForFile({ slug: "oak-park-il", filename: "2017-09-18_Agenda.pdf" })).toBe(meetings);
+    expect(citationUrlForFile({ slug: "oak-park-il", filename: "2020 Remedial Action Plan.pdf" })).toBeNull();
+    expect(citationUrlForFile({ slug: "oak-park-il", filename: "fence-guidelines-2025-08.pdf" })).toContain("fence-guidelines-2025-08.pdf");
+    expect(citationUrlForFile({ slug: "strawberry-point-ia", filename: "Minutes - 2025-05-06.pdf" })).toBeNull();
+  });
 });

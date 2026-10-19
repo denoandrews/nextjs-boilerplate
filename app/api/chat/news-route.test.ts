@@ -47,7 +47,7 @@ describe("newspaper search request flow", () => {
     const body = await response.json();
     expect(body.newsSearched).toBe(false);
     expect(body.citations).toEqual([{ fileId: "file-sp", filename: "minutes.pdf" }]);
-    expect(mocks.create.mock.calls[0][0].tools).toEqual([{ type: "file_search", vector_store_ids: ["vs-sp"], max_num_results: 8 }]);
+    expect(mocks.create.mock.calls[0][0].tools).toEqual([{ type: "file_search", vector_store_ids: ["vs-sp"], max_num_results: 16 }]);
     expect(mocks.create.mock.calls[0][0].instructions).not.toContain("oak-park.us");
   });
   it("returns a retryable error when the model call times out", async () => {
