@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { answerSegments, approvedNewspaperUrl, cleanCitedText, closeTruncatedAnswer, externalLinkProps, extractCitedAnswer, newspaperDomains, splitNewsReferences } from "./news-search";
+import { answerSegments, approvedNewspaperUrl, cleanCitedText, closeTruncatedAnswer, externalLinkProps, extractCitedAnswer, newspaperDomains, restorePeriodsAtFileCitations, splitNewsReferences } from "./news-search";
 
 function response(text: string, annotations: unknown[]) {
   return { output: [{ type: "web_search_call" }, { type: "message", content: [{ type: "output_text", text, annotations }] }] } as never;
@@ -44,6 +44,28 @@ describe("Oak Park newspaper search", () => {
   it("keeps a period that a marker swallowed at the end of a paragraph", () => {
     const marked = "Place carts out by 7:00 a.m. on that day \uE200cite\uE202turn0file0.\uE201\n\nThe next pickup is Thursday.";
     expect(cleanCitedText(marked)).toBe("Place carts out by 7:00 a.m. on that day.\n\nThe next pickup is Thursday.");
+  });
+  it("puts a period back when a citation marker ends a paragraph before the break", () => {
+    const marked = "Place carts out by 7:00 a.m. on that day \uE200filecite\uE202turn0file2\uE202turn0file6\uE201\n\nBuildings of five or fewer units are collected once a week.";
+    expect(cleanCitedText(marked)).toBe("Place carts out by 7:00 a.m. on that day.\n\nBuildings of five or fewer units are collected once a week.");
+    expect(cleanCitedText("the \uE200cite\uE202turn0file1\uE201 ordinance requires a permit.")).toBe("the ordinance requires a permit.");
+  });
+  it("restores a period from a file_citation index at a paragraph break", () => {
+    const text = "Place carts out by 7:00 a.m. on that day\n\nThe final sentence has its period.";
+    const index = text.indexOf("\n\n");
+    expect(restorePeriodsAtFileCitations(text, [index, index])).toBe("Place carts out by 7:00 a.m. on that day.\n\nThe final sentence has its period.");
+    expect(restorePeriodsAtFileCitations("the ordinance requires a permit.", [4])).toBe("the ordinance requires a permit.");
+    const extracted = extractCitedAnswer({
+      output: [{
+        type: "message",
+        content: [{
+          type: "output_text",
+          text,
+          annotations: [{ type: "file_citation", file_id: "file-1", filename: "Garbage Collection.pdf", index }],
+        }],
+      }],
+    } as never, false);
+    expect(extracted.answer).toBe("Place carts out by 7:00 a.m. on that day.\n\nThe final sentence has its period.");
   });
   it("keeps a period that a marker swallowed at the end of an answer", () => {
     expect(cleanCitedText("Final sentence \uE200cite\uE202turn0file2.\uE201")).toBe("Final sentence.");
@@ -90,5 +112,17 @@ describe("Oak Park newspaper search", () => {
     expect(parts.at(-1)?.text).toBe(".");
     expect(externalLinkProps("mailto:clerkwaters@oak-park.us")).toEqual({});
     expect(externalLinkProps("https://www.oak-park.us/")).toEqual({ target: "_blank", rel: "noopener noreferrer" });
+  });
+  it("links an official page when the answer names it without a URL", () => {
+    const parts = answerSegments(
+      "Use the Village's garbage collection page and the Lakeshore Recycling Systems Oak Park page.",
+      [],
+      "oak-park-il"
+    );
+    expect(parts.filter((part) => part.href).map((part) => part.href)).toEqual([
+      "https://www.oak-park.us/Services-Parking/Waste-Recycling/Garbage-Collection",
+      "https://www.lrsrecycles.com/municipality/oak-park/",
+    ]);
+    expect(answerSegments("the garbage collection page", [], "strawberry-point-ia").every((part) => !part.href)).toBe(true);
   });
 });

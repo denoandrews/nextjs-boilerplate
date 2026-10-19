@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   allowedAnswerUrl,
+  citationSourceNote,
   citationUrlForFile,
   officialPages,
   safeHttpsUrl,
@@ -46,5 +47,7 @@ describe("official source links", () => {
     expect(citationUrlForFile({ slug: "oak-park-il", filename: "2020 Remedial Action Plan.pdf" })).toBeNull();
     expect(citationUrlForFile({ slug: "oak-park-il", filename: "fence-guidelines-2025-08.pdf" })).toContain("fence-guidelines-2025-08.pdf");
     expect(citationUrlForFile({ slug: "strawberry-point-ia", filename: "Minutes - 2025-05-06.pdf" })).toBeNull();
+    expect(citationSourceNote(meetings, "oak-park-il")).toBe("meetings");
+    expect(citationSourceNote("https://www.oak-park.us/files/assets/oakpark/v/2/finance/budgets/fy26-budget-book-final.pdf", "oak-park-il")).toBeNull();
   });
 });

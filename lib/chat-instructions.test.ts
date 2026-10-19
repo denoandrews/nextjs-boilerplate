@@ -26,6 +26,11 @@ describe("municipal clock and instructions", () => {
     expect(instructions).toContain("Do not open with Yes or No");
     expect(instructions).toContain("general fund");
     expect(instructions).toContain("property tax levy is not the general fund");
+    expect(instructions).toContain("$19,125,000");
+    expect(instructions).toContain("not the general fund budget");
+    expect(instructions).toContain("language of the latest user question");
+    expect(instructions).toContain("previous question was Spanish");
+    expect(instructions).toContain("put its exact URL");
     expect(instructions).toContain("pickup day");
     expect(instructions).toContain("2020 Remedial Action Plan");
     expect(instructions).toContain("2017-09-18 agenda is older than a 2026-10-13 agenda");

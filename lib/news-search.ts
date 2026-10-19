@@ -1,5 +1,5 @@
 import type OpenAI from "openai";
-import { allowedAnswerUrl, citationUrlForFile, safeHttpsUrl } from "@/lib/source-links";
+import { allowedAnswerUrl, citationUrlForFile, officialMentions, safeHttpsUrl } from "@/lib/source-links";
 import { uiLocale } from "@/lib/ui-locale";
 
 const NEWSPAPER_DOMAINS = ["oakpark.com", "chicagotribune.com"];
@@ -47,14 +47,55 @@ function punctuationKeptFromMarker(inner: string, before: string, after: string)
   return trailing;
 }
 
+function atParagraphBoundary(after: string) {
+  return new RegExp(`^${HORIZONTAL_SPACE.source}*(?:\\n|$)`).test(after);
+}
+
+function endsWithSentencePunctuation(before: string) {
+  return new RegExp(`[.!?…]["')\\]]*${HORIZONTAL_SPACE.source}*$`).test(before);
+}
+
+/**
+ * File-search citations are trained to land at the end of a paragraph. When the
+ * marker itself has no period, and neither side of it does, the paragraph would
+ * otherwise end on the last word. Put the period back only at that boundary.
+ */
+function markerReplacement(inner: string, before: string, after: string) {
+  const kept = punctuationKeptFromMarker(inner, before, after);
+  if (kept) return kept;
+  if (!atParagraphBoundary(after) || endsWithSentencePunctuation(before)) return "";
+  return /[A-Za-z0-9)"'\]]$/.test(before.trimEnd()) ? "." : "";
+}
+
 export function cleanCitedText(text: string): string {
   const restored = text.replace(CITATION_MARKER, (match, inner: string, offset: number) =>
-    punctuationKeptFromMarker(inner, text.slice(0, offset), text.slice(offset + match.length))
+    markerReplacement(inner, text.slice(0, offset), text.slice(offset + match.length))
   );
   return restored
     .replace(EXTRA_SPACES, " ")
     .replace(SPACE_BEFORE_PUNCTUATION, "$1")
     .replace(TRAILING_SPACE, "");
+}
+
+/**
+ * The Responses API often strips `\uE200cite\uE202...\uE201` before we see the
+ * text and leaves a `file_citation.index` at that point. A citation at a
+ * paragraph break can take the period with it. Restore it when the index sits
+ * on that break and the paragraph does not already end with punctuation.
+ */
+export function restorePeriodsAtFileCitations(text: string, indexes: number[]): string {
+  const points = [...new Set(indexes.filter((index) => Number.isInteger(index) && index >= 0 && index <= text.length))]
+    .sort((left, right) => right - left);
+  let result = text;
+  for (const index of points) {
+    const before = result.slice(0, index);
+    const after = result.slice(index);
+    if (!atParagraphBoundary(after) || endsWithSentencePunctuation(before)) continue;
+    const trimmed = before.trimEnd();
+    if (!/[A-Za-z0-9)"'\]]$/.test(trimmed)) continue;
+    result = `${trimmed}.${before.slice(trimmed.length)}${after}`;
+  }
+  return result;
 }
 
 function attributeUrl(attributes: { [key: string]: string | number | boolean } | null | undefined) {
@@ -118,8 +159,10 @@ export function extractCitedAnswer(
     for (const content of item.content) {
       if (content.type !== "output_text") continue;
       const replacements: { start: number; end: number; marker: string }[] = [];
+      const fileIndexes: number[] = [];
       for (const annotation of content.annotations) {
         if (annotation.type === "file_citation") {
+          if (Number.isInteger(annotation.index)) fileIndexes.push(annotation.index);
           const url = citationUrlForFile({
             slug: options?.slug,
             filename: annotation.filename,
@@ -152,13 +195,22 @@ export function extractCitedAnswer(
         }
       }
       let text = content.text;
+      const citationIndexes = fileIndexes.map((index) => {
+        let shifted = index;
+        for (const replacement of replacements) {
+          if (replacement.end <= index) shifted += replacement.marker.length - (replacement.end - replacement.start);
+        }
+        return shifted;
+      });
       let boundary = text.length;
       for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
         if (replacement.end > boundary) continue;
         text = text.slice(0, replacement.start) + replacement.marker + text.slice(replacement.end);
         boundary = replacement.start;
       }
-      // Drop provider-only markup. The file sources and validated news links are rendered separately.
+      // Inline markers still carry the citation. Once the API has removed them,
+      // the file_citation index is the only place the missing period can be found.
+      if (!text.includes("\uE200")) text = restorePeriodsAtFileCitations(text, citationIndexes);
       paragraphs.push(cleanCitedText(text));
     }
   }
@@ -188,9 +240,10 @@ function safeMailto(value: string): string | null {
   return `mailto:${value}`;
 }
 
+type TextLink = { start: number; end: number; text: string; href?: string };
+
 function linkifyPlainText(text: string, slug?: string): AnswerSegment[] {
-  const parts: AnswerSegment[] = [];
-  let last = 0;
+  const found: TextLink[] = [];
   for (const match of text.matchAll(LINKABLE)) {
     const start = match.index ?? 0;
     const raw = match[0];
@@ -198,14 +251,26 @@ function linkifyPlainText(text: string, slug?: string): AnswerSegment[] {
     const href = raw.startsWith("https://")
       ? (slug ? allowedAnswerUrl(trimmed, slug) : null) ?? approvedNewspaperUrl(trimmed)
       : safeMailto(trimmed);
-    if (start > last) parts.push({ text: text.slice(last, start) });
-    if (href) {
-      parts.push({ text: trimmed, href });
-      last = start + trimmed.length;
-    } else {
-      parts.push({ text: raw });
-      last = start + raw.length;
+    found.push(href
+      ? { start, end: start + trimmed.length, text: trimmed, href }
+      : { start, end: start + raw.length, text: raw });
+  }
+  if (slug) {
+    for (const mention of officialMentions(slug)) {
+      for (const match of text.matchAll(mention.pattern)) {
+        const start = match.index ?? 0;
+        found.push({ start, end: start + match[0].length, text: match[0], href: mention.url });
+      }
     }
+  }
+  found.sort((left, right) => left.start - right.start || right.end - left.end);
+  const parts: AnswerSegment[] = [];
+  let last = 0;
+  for (const link of found) {
+    if (link.start < last) continue;
+    if (link.start > last) parts.push({ text: text.slice(last, link.start) });
+    parts.push(link.href ? { text: link.text, href: link.href } : { text: link.text });
+    last = link.end;
   }
   if (last < text.length) parts.push({ text: text.slice(last) });
   return parts.filter((part) => part.text.length > 0);
