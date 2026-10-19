@@ -137,6 +137,12 @@ textarea {
   margin-top: 6px;
 }
 
+.message a,
+.sources a,
+.sources li {
+  overflow-wrap: anywhere;
+}
+
 .status {
   color: var(--muted);
   font-size: 0.9rem;

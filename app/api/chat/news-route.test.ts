@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ create: vi.fn(), config: vi.fn(), usage: vi.fn(), log: vi.fn() }));
-vi.mock("openai", () => ({ default: class { responses = { create: mocks.create }; } }));
+const mocks = vi.hoisted(() => ({ create: vi.fn(), config: vi.fn(), usage: vi.fn(), log: vi.fn(), client: vi.fn() }));
+vi.mock("openai", () => ({
+  default: class {
+    constructor(options: unknown) {
+      mocks.client(options);
+    }
+    responses = { create: mocks.create };
+  },
+}));
 vi.mock("@/lib/municipalities", () => ({ getMunicipalityConfig: mocks.config }));
 vi.mock("@/lib/chat-limits", () => ({ reserveChatQuery: async () => ({ allowed: true }) }));
 vi.mock("@/lib/chat-logging", () => ({ logChatExchange: async (input: unknown) => { mocks.log(input); return {}; } }));
@@ -20,6 +27,13 @@ describe("newspaper search request flow", () => {
     expect(body.answer).toBe("News [News 1]");
     expect(body.newsSearched).toBe(true);
     expect(mocks.create.mock.calls[0][0].model).toBe("gpt-5.4-mini");
+    expect(mocks.create.mock.calls[0][0].max_output_tokens).toBe(1600);
+    expect(mocks.create.mock.calls[0][0].include).toEqual(["file_search_call.results"]);
+    expect(mocks.create.mock.calls[0][0].instructions).toContain("America/Chicago");
+    expect(mocks.create.mock.calls[0][0].instructions).toContain("in the past");
+    expect(mocks.create.mock.calls[0][0].instructions).toContain("You do not have a weather tool");
+    expect(mocks.create.mock.calls[0][0].instructions).toContain("https://www.oak-park.us/Government/Information-and-Resources/Freedom-of-Information-Act-FOIA");
+    expect(mocks.client).toHaveBeenCalledWith(expect.objectContaining({ timeout: 50_000, maxRetries: 0 }));
     expect(mocks.create.mock.calls[0][0].reasoning).toEqual({ effort: "none" });
     expect(body.citations[0].url).toBe("https://www.oakpark.com/story");
     expect(mocks.create.mock.calls[0][0].tools).toContainEqual(expect.objectContaining({ type: "web_search", external_web_access: true, filters: { allowed_domains: ["oakpark.com", "chicagotribune.com"] } }));
@@ -34,5 +48,15 @@ describe("newspaper search request flow", () => {
     expect(body.newsSearched).toBe(false);
     expect(body.citations).toEqual([{ fileId: "file-sp", filename: "minutes.pdf" }]);
     expect(mocks.create.mock.calls[0][0].tools).toEqual([{ type: "file_search", vector_store_ids: ["vs-sp"], max_num_results: 8 }]);
+    expect(mocks.create.mock.calls[0][0].instructions).not.toContain("oak-park.us");
+  });
+  it("returns a retryable error when the model call times out", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-only");
+    mocks.config.mockResolvedValue({ id: "oak", slug: "oak-park-il", name: "Oak Park", vectorStoreIds: ["vs-oak"] });
+    mocks.create.mockRejectedValue(Object.assign(new Error("timed out"), { name: "APIConnectionTimeoutError" }));
+    const response = await POST(new Request("https://app.test/api/chat", { method: "POST", body: JSON.stringify({ message: "Next board meeting", municipalitySlug: "oak-park-il" }) }));
+    const body = await response.json();
+    expect(response.status).toBe(504);
+    expect(body.error).toBe("That search took too long. Please try again.");
   });
 });
