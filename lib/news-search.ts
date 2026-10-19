@@ -26,15 +26,35 @@ export function approvedNewspaperUrl(value: string): string | null {
   }
 }
 
-const CITATION_MARKER = /\uE200(?:cite|filecite)\uE202[^\uE201]*\uE201/g;
+const CITATION_MARKER = /\uE200(?:cite|filecite)\uE202([^\uE201]*)\uE201/g;
 const SPACE_BEFORE_PUNCTUATION = /[ \t\u00A0\u2000-\u200A]+([.,;:!?])/g;
 const EXTRA_SPACES = /[ \t\u00A0\u2000-\u200A]{2,}/g;
+const TRAILING_SPACE = /[ \t\u00A0\u2000-\u200A]+(?=\n|$)/g;
+const HORIZONTAL_SPACE = /[ \t\u00A0\u2000-\u200A]/;
+
+/**
+ * File-search markers sometimes swallow the sentence punctuation that sat
+ * against them (`day \uE200cite\uE202turn0file0.\uE201`). Keep that punctuation
+ * unless the text on either side already has it.
+ */
+function punctuationKeptFromMarker(inner: string, before: string, after: string): string {
+  const trailing = inner.match(/[.,;:!?]+$/)?.[0] ?? "";
+  if (!trailing) return "";
+  const previous = before.match(new RegExp(`([.,;:!?])${HORIZONTAL_SPACE.source}*$`));
+  if (previous && trailing.startsWith(previous[1])) return "";
+  const next = after.match(new RegExp(`^${HORIZONTAL_SPACE.source}*([.,;:!?])`));
+  if (next && trailing.endsWith(next[1])) return "";
+  return trailing;
+}
 
 export function cleanCitedText(text: string): string {
-  return text
-    .replace(CITATION_MARKER, "")
+  const restored = text.replace(CITATION_MARKER, (match, inner: string, offset: number) =>
+    punctuationKeptFromMarker(inner, text.slice(0, offset), text.slice(offset + match.length))
+  );
+  return restored
     .replace(EXTRA_SPACES, " ")
-    .replace(SPACE_BEFORE_PUNCTUATION, "$1");
+    .replace(SPACE_BEFORE_PUNCTUATION, "$1")
+    .replace(TRAILING_SPACE, "");
 }
 
 function attributeUrl(attributes: { [key: string]: string | number | boolean } | null | undefined) {
@@ -159,15 +179,25 @@ export function splitNewsReferences(text: string, citations: ChatCitation[] = []
 export type AnswerSegment = { text: string; href?: string };
 
 const PLAIN_URL = /https:\/\/[^\s<>"')\]]+/g;
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const LINKABLE = new RegExp(`${PLAIN_URL.source}|${EMAIL.source}`, "g");
+
+function safeMailto(value: string): string | null {
+  if (!new RegExp(`^${EMAIL.source}$`).test(value)) return null;
+  if (value.length > 254) return null;
+  return `mailto:${value}`;
+}
 
 function linkifyPlainText(text: string, slug?: string): AnswerSegment[] {
   const parts: AnswerSegment[] = [];
   let last = 0;
-  for (const match of text.matchAll(PLAIN_URL)) {
+  for (const match of text.matchAll(LINKABLE)) {
     const start = match.index ?? 0;
     const raw = match[0];
     const trimmed = raw.replace(/[.,;:!?]+$/g, "");
-    const href = (slug ? allowedAnswerUrl(trimmed, slug) : null) ?? approvedNewspaperUrl(trimmed);
+    const href = raw.startsWith("https://")
+      ? (slug ? allowedAnswerUrl(trimmed, slug) : null) ?? approvedNewspaperUrl(trimmed)
+      : safeMailto(trimmed);
     if (start > last) parts.push({ text: text.slice(last, start) });
     if (href) {
       parts.push({ text: trimmed, href });
@@ -179,6 +209,11 @@ function linkifyPlainText(text: string, slug?: string): AnswerSegment[] {
   }
   if (last < text.length) parts.push({ text: text.slice(last) });
   return parts.filter((part) => part.text.length > 0);
+}
+
+export function externalLinkProps(href: string): { target?: "_blank"; rel?: string } {
+  if (href.startsWith("mailto:")) return {};
+  return { target: "_blank", rel: "noopener noreferrer" };
 }
 
 export function answerSegments(text: string, citations: ChatCitation[] = [], slug?: string): AnswerSegment[] {

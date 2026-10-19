@@ -169,7 +169,7 @@ export async function POST(req: Request) {
           {
             type: "file_search",
             vector_store_ids: municipality.vectorStoreIds,
-            max_num_results: 8,
+            max_num_results: 16,
           },
           ...(newsDomains.length ? [{
             type: "web_search" as const,

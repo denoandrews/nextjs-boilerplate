@@ -85,7 +85,7 @@ Example embed:
 - File-search records are the only answer source; unrestricted web search is disabled.
 - Municipality identity is configuration-driven rather than hard-coded.
 - The server, not the browser, selects the vector stores.
-- Citations are extracted from API response annotations rather than generated as plain text. A citation is a link when a URL is known from `documents.external_url`, a vector-store file attribute (`source_url`, `url`, or `external_url`), or a filename mapping. Oak Park answers may also share a fixed list of official pages.
+- Citations are extracted from API response annotations rather than generated as plain text. A citation is a link when a URL is known from `documents.external_url`, a vector-store file attribute (`source_url`, `url`, or `external_url`), or a filename mapping. Agenda and minutes filenames link to the Village Board meetings page until a per-file URL is stored. Other packet PDFs, including a remedial-action plan, stay plain text. Oak Park answers may also share a fixed list of official pages. Email addresses in an answer are `mailto` links.
 - Questions and submitted conversation history are length-limited.
 - The widget keeps the visible conversation in `sessionStorage` for the browser tab. Reloading that tab restores it. Closing the tab clears it. The anonymous rate-limit id stays in `localStorage`, separate from the transcript.
 - Answers have a hard output-token ceiling (800 by default, 1,600 for gpt-5 models). An answer cut off by that ceiling is closed at the last complete sentence when possible and says it was cut off.
@@ -128,7 +128,7 @@ await openai.vectorStores.files.update(vectorStoreId, fileId, {
 
 `document_type` should be one of `ordinance`, `resolution`, `minutes`, `agenda`, `policy`, `guideline`, `draft`, or `study`. `status` should be `adopted`, `draft`, `proposed`, or `superseded`. `record_date` is the adoption, revision, or meeting date as `YYYY-MM-DD`.
 
-For files already tracked in Supabase, set `documents.external_url` as well. The chat route uses that URL before a filename guess. Suggested labels for the records that produced weak answers: mark a real draft zoning text `status=draft` (the April 3, 2026 revision of the 2017 zoning ordinance is adopted, not a draft); mark the 2020 remedial-action plan `document_type=study`; set `record_date` on minutes and agendas so a later filter can prefer the newest decision. Add the filter only after those attributes exist.
+For files already tracked in Supabase, set `documents.external_url` as well. The chat route uses that URL before a filename guess. Suggested labels for the records that produced weak answers: mark a real draft zoning text `status=draft` (the April 3, 2026 revision of the 2017 zoning ordinance is adopted, not a draft); mark the 2020 remedial-action plan `document_type=study` so it is not treated as a FOIA, noise, or parking source; set `record_date` and `source_url` on minutes and agendas, including the October 13, 2026 agenda and the May 6, 2025 minutes. Add a metadata filter only after those attributes exist. File search currently returns 16 results and does not sort by filename date.
 
 ## Still required before selling
 

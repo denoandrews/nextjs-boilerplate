@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { answerSegments, approvedNewspaperUrl, cleanCitedText, closeTruncatedAnswer, extractCitedAnswer, newspaperDomains, splitNewsReferences } from "./news-search";
+import { answerSegments, approvedNewspaperUrl, cleanCitedText, closeTruncatedAnswer, externalLinkProps, extractCitedAnswer, newspaperDomains, splitNewsReferences } from "./news-search";
 
 function response(text: string, annotations: unknown[]) {
   return { output: [{ type: "web_search_call" }, { type: "message", content: [{ type: "output_text", text, annotations }] }] } as never;
@@ -36,10 +36,24 @@ describe("Oak Park newspaper search", () => {
     const result = extractCitedAnswer(response("Whole answer", [{ type: "url_citation", url: "https://oakpark.com/a", title: "Article", start_index: -1, end_index: 999 }]), true);
     expect(result.answer).toBe("Whole answer");
   });
-  it("removes citation markers without leaving a space before punctuation", () => {
+  it("keeps a period when a citation marker sits immediately before it", () => {
     const marked = "The title is 'Village President' \uE200cite\uE202turn0file1\uE201.";
     expect(cleanCitedText(marked)).toBe("The title is 'Village President'.");
     expect(cleanCitedText("the \uE200filecite\uE202x\uE201 ordinance")).toBe("the ordinance");
+  });
+  it("keeps a period that a marker swallowed at the end of a paragraph", () => {
+    const marked = "Place carts out by 7:00 a.m. on that day \uE200cite\uE202turn0file0.\uE201\n\nThe next pickup is Thursday.";
+    expect(cleanCitedText(marked)).toBe("Place carts out by 7:00 a.m. on that day.\n\nThe next pickup is Thursday.");
+  });
+  it("keeps a period that a marker swallowed at the end of an answer", () => {
+    expect(cleanCitedText("Final sentence \uE200cite\uE202turn0file2.\uE201")).toBe("Final sentence.");
+    expect(cleanCitedText("Final sentence.\uE200cite\uE202turn0file2.\uE201")).toBe("Final sentence.");
+    expect(cleanCitedText("Final sentence \uE200cite\uE202turn0file2.\uE201.")).toBe("Final sentence.");
+    const extracted = extractCitedAnswer(response(
+      "Final sentence \uE200cite\uE202turn0file2.\uE201",
+      [{ type: "file_citation", file_id: "file-2", filename: "minutes.pdf" }]
+    ), false);
+    expect(extracted.answer).toBe("Final sentence.");
   });
   it("links a file from metadata, then from a known filename", () => {
     const withAttribute = extractCitedAnswer({
@@ -69,5 +83,12 @@ describe("Oak Park newspaper search", () => {
     expect(linked.filter((part) => part.href)).toHaveLength(1);
     expect(linked.at(-1)?.text).toBe(".");
     expect(answerSegments("https://www.oak-park.us/Government/Leadership/Village-Board", [], "strawberry-point-ia").every((part) => !part.href)).toBe(true);
+  });
+  it("turns an email address into a mailto link and leaves the following period", () => {
+    const parts = answerSegments("Write to clerkwaters@oak-park.us.", [], "oak-park-il");
+    expect(parts.find((part) => part.href)).toEqual({ text: "clerkwaters@oak-park.us", href: "mailto:clerkwaters@oak-park.us" });
+    expect(parts.at(-1)?.text).toBe(".");
+    expect(externalLinkProps("mailto:clerkwaters@oak-park.us")).toEqual({});
+    expect(externalLinkProps("https://www.oak-park.us/")).toEqual({ target: "_blank", rel: "noopener noreferrer" });
   });
 });

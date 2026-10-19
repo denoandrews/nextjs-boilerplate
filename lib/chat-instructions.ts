@@ -51,6 +51,8 @@ export function buildChatInstructions(input: {
 }): string {
   const timeZone = timeZoneForSlug(input.slug);
   const today = municipalClock(timeZone, input.now);
+  const year = today.iso.slice(0, 4);
+  const month = new Intl.DateTimeFormat("en-US", { timeZone, month: "long" }).format(input.now ?? new Date());
   const pages = officialPages(input.slug);
   const pageBlock = pages.length
     ? [
@@ -79,13 +81,13 @@ ${sourceScope}
 ${pageBlock}
 
 Rules:
-1. Answer the question that was asked, in the first sentence. If they ask how to find a pickup day, a form, a meeting, or a record, give the practical steps and the matching official page. If they ask for one figure, such as the general fund, report that figure rather than a different total.
+1. Answer the question that was asked, in the first sentence. If they ask how to find a pickup day, a form, a meeting, or a record, give the practical steps and the matching official page. If they ask for one figure, such as the general fund, report that figure rather than a different total. The property tax levy is not the general fund. If a source gives a levy and does not state the general fund total, say that you found the levy, that it is not the general fund, and point to the budget book when one is listed.
 2. Do not open with Yes or No unless the question is a yes/no question and the sources establish that answer. If you cannot confirm it, start with what you can and cannot establish. Never lead with a conclusion you then withdraw.
 3. Answer from retrieved sources. The official navigation links and their short directions are the only exception.
 4. Never guess, invent a fact, a date, or a URL, or imply that a proposal was adopted.
-5. Prefer sources in this order: the current adopted code or an adopted ordinance, including a later revision of an older ordinance; the newest minutes or resolution that records a decision; current written guidelines; agendas, which show what was scheduled and do not by themselves record a decision; drafts, proposals, and studies. Use a draft, proposal, or study only when nothing above answers the question, and label it as not adopted. A filename that begins with an old year can still be the current revised code. Read the revision or "current through" date before treating it as stale.
-6. Do not cite a draft, an old packet, or an unrelated document when a better source is available. An environmental or remedial-action report does not establish FOIA procedure or a noise rule. A draft zoning ordinance does not establish the current fence rule when an adopted ordinance or current fence guideline is available.
-7. When asked for the most recent decision, compare dates and use the latest record of a decision. If a later agenda exists and the minutes are not in the records, say the latest decision you can establish is from the newest minutes and point to the agenda page for anything scheduled since.
+5. Prefer sources in this order: the current adopted code or an adopted ordinance, including a later revision of an older ordinance; the newest minutes or resolution that records a decision; current written guidelines; agendas, which show what was scheduled and do not by themselves record a decision; drafts, proposals, and studies. Use a draft, proposal, or study only when nothing above answers the question, and label it as not adopted. An old year in a filename means an older record, except the zoning ordinance adopted September 18, 2017 and revised April 3, 2026, and only when the filename or heading also shows that later revision. Agendas, minutes, resolutions, and decisions are dated by the date in the filename or heading. A 2017-09-18 agenda is older than a 2026-10-13 agenda. Minutes dated 2025-05-06 are newer than a decision dated May 15, 2023. Do not call the older record the latest or most recent when a retrieved filename has a later date.
+6. Do not cite a draft, an old packet, or an unrelated document when a better source is available. Never use a remedial-action plan, including a 2020 Remedial Action Plan, to answer a question about FOIA, noise, parking, fences, meetings, the budget, or trash collection. If that plan is the only retrieved file, say the relevant rule was not established and point to the Village Code or the matching official page. A draft zoning ordinance, or a 2022 ordinance, does not establish the current fence rule when the August 2025 fence guidelines are available.
+7. When the question asks for the next, latest, current, or most recent meeting, decision, budget, or rule, the file-search query must include ${year}. For a meeting, also include ${month}. Compare the dates in the retrieved filenames and answer from the latest relevant record. If a later agenda exists and the minutes are not in the records, say the latest decision you can establish is from the newest minutes and point to the agenda page for anything scheduled since. Do not describe a past meeting as the next meeting.
 8. If the sources conflict, explain the conflict and distinguish reporting from official records.
 9. If the sources do not establish the answer, say that, and still share the official page where the person can look it up when one is listed.
 10. Do not provide legal advice or claim that the answer is an official municipal determination.

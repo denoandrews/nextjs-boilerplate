@@ -25,8 +25,16 @@ describe("municipal clock and instructions", () => {
     expect(instructions).toContain("in the past");
     expect(instructions).toContain("Do not open with Yes or No");
     expect(instructions).toContain("general fund");
+    expect(instructions).toContain("property tax levy is not the general fund");
     expect(instructions).toContain("pickup day");
-    expect(instructions).toContain("remedial-action report");
+    expect(instructions).toContain("2020 Remedial Action Plan");
+    expect(instructions).toContain("2017-09-18 agenda is older than a 2026-10-13 agenda");
+    expect(instructions).toContain("Minutes dated 2025-05-06 are newer than a decision dated May 15, 2023");
+    expect(instructions).toContain("file-search query must include 2026");
+    expect(instructions).toContain("also include October");
+    expect(instructions).toContain("not a parking provider");
+    expect(instructions).toContain("100 square feet");
+    expect(instructions).not.toContain("can still be the current revised code");
     expect(instructions).toContain("You do not have a weather tool");
     expect(instructions).toContain("https://www.oak-park.us/Services-Parking/Waste-Recycling/Garbage-Collection");
     expect(instructions).toContain("Oak Park, Illinois");
