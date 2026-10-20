@@ -151,10 +151,22 @@ npm run tag-vector-store -- --out oak-park-tags.csv
 
 Open `oak-park-tags.csv`. Correct any date, type, status, title, or URL. For each row that should be written, set `needs_review` to `no`. Leave `yes` on a row to skip it. A cleared row still needs a `document_type`. Blank `status` and blank `record_date` are allowed and are omitted from the update.
 
-This command is the only one that writes. It calls the vector store file update endpoint with attributes and nothing else. Each update or skip is printed and appended to `oak-park-tags.csv.apply.log`.
+This command is the only one that writes. It calls the vector store file update endpoint with attributes and nothing else. Each update, retry, or skip is printed and appended to `oak-park-tags.csv.apply.log`. Each request uses a 30 second timeout (`--timeout-ms`) and 2 client retries. A row that still fails is tried up to 3 times with a short backoff, then logged as `failed` so the loop can move on.
 
 ```bash
 npm run tag-vector-store -- --apply oak-park-tags.csv
+```
+
+If a run stops, continue without rewriting files already logged as `updated`:
+
+```bash
+npm run tag-vector-store -- --apply oak-park-tags.csv --resume oak-park-tags.csv.apply.log
+```
+
+To send only the rows whose latest log line is `failed`:
+
+```bash
+npm run tag-vector-store -- --apply oak-park-tags.csv --retry-failed oak-park-tags.csv.apply.log
 ```
 
 `--delay-ms 200` is the pause between API calls. `--refresh` ignores the text cache. `--limit 20` scans a short sample; do not treat that CSV as the full store. The same commands work for a later city by changing `MUNICIPALITY_SLUG` and `VECTOR_STORE_ID`.
