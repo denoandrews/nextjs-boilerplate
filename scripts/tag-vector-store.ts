@@ -11,6 +11,13 @@ import { parseArgs } from "node:util";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 
+import {
+  applyAttemptBudgetMs,
+  classifyApplyRow,
+  parseApplyLog,
+  retryOperation,
+  withDeadline,
+} from "../lib/vector-store-apply-log";
 import { readScanCache, writeScanCache, type CachedScan } from "../lib/vector-store-tag-cache";
 import { extractOpeningPdfText } from "../lib/vector-store-pdf";
 import {
@@ -38,6 +45,9 @@ const { values } = parseArgs({
     out: { type: "string" },
     cache: { type: "string" },
     "delay-ms": { type: "string" },
+    "timeout-ms": { type: "string" },
+    resume: { type: "string" },
+    "retry-failed": { type: "string" },
     limit: { type: "string" },
     refresh: { type: "boolean", default: false },
     "supabase-url": { type: "string" },
@@ -50,11 +60,14 @@ function printHelp() {
   console.log(`Usage:
   npm run tag-vector-store -- --out oak-park-tags.csv
   npm run tag-vector-store -- --apply oak-park-tags.csv
+  npm run tag-vector-store -- --apply oak-park-tags.csv --resume oak-park-tags.csv.apply.log
+  npm run tag-vector-store -- --apply oak-park-tags.csv --retry-failed oak-park-tags.csv.apply.log
 
 Dry run is the default and writes nothing to OpenAI.
 Required: OPENAI_API_KEY and VECTOR_STORE_ID (or --api-key and --vector-store).
 Required: MUNICIPALITY_SLUG or --city.
-Optional: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, --delay-ms, --cache, --refresh, --limit.`);
+Optional: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, --delay-ms, --timeout-ms, --cache, --refresh, --limit.
+--resume and --retry-failed are only used with --apply.`);
 }
 
 async function main() {
@@ -66,17 +79,23 @@ async function main() {
   const vectorStoreId = values["vector-store"] || process.env.VECTOR_STORE_ID || process.env.VECTOR_STORE_IDS?.split(",")[0]?.trim() || "";
   const city = (values.city || process.env.MUNICIPALITY_SLUG || process.env.CITY || "").trim();
   const delayMs = Number(values["delay-ms"] ?? "200");
+  const timeoutMs = Number(values["timeout-ms"] ?? "30000");
   const limit = values.limit == null ? null : Number(values.limit);
+  if ((values.resume || values["retry-failed"]) && !values.apply) {
+    throw new Error("--resume and --retry-failed are used with --apply.");
+  }
+  if (values.resume && values["retry-failed"]) throw new Error("Pass only one of --resume or --retry-failed.");
   if (!apiKey) throw new Error("Set OPENAI_API_KEY or pass --api-key.");
   if (!vectorStoreId) throw new Error("Set VECTOR_STORE_ID or pass --vector-store.");
   if (!/^[\w-]+$/.test(vectorStoreId)) throw new Error("The vector store id has unexpected characters.");
   if (!Number.isFinite(delayMs) || delayMs < 0) throw new Error("--delay-ms must be a number that is zero or greater.");
   if (limit != null && (!Number.isInteger(limit) || limit < 1)) throw new Error("--limit must be a positive integer.");
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) throw new Error("--timeout-ms must be a positive integer.");
   if (!city || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(city)) {
     throw new Error("Set MUNICIPALITY_SLUG or pass --city, using a lowercase slug such as oak-park-il.");
   }
 
-  const openai = new OpenAI({ apiKey, timeout: 60_000, maxRetries: 0 });
+  const openai = new OpenAI({ apiKey, timeout: timeoutMs, maxRetries: 2 });
   const pace = createPacer(delayMs);
 
   if (values.apply) {
@@ -85,6 +104,9 @@ async function main() {
       vectorStoreId,
       csvPath: values.apply,
       pace,
+      timeoutMs,
+      resumeLog: values.resume,
+      retryFailedLog: values["retry-failed"],
     });
     return;
   }
@@ -203,14 +225,23 @@ async function applyReviewedCsv(input: {
   vectorStoreId: string;
   csvPath: string;
   pace: () => Promise<void>;
+  timeoutMs: number;
+  resumeLog?: string;
+  retryFailedLog?: string;
 }) {
   const rows = parseTagsCsv(readFileSync(input.csvPath, "utf8"));
   const logPath = `${input.csvPath}.apply.log`;
+  const resumeUpdated = input.resumeLog ? parseApplyLog(readFileSync(input.resumeLog, "utf8")).updated : undefined;
+  const retryFailed = input.retryFailedLog ? parseApplyLog(readFileSync(input.retryFailedLog, "utf8")).failed : undefined;
   const seen = new Set<string>();
   let updated = 0;
   let skipped = 0;
   let failed = 0;
+  const attemptBudget = applyAttemptBudgetMs(input.timeoutMs, 2);
   console.log(`Applying reviewed rows in ${input.csvPath} to ${input.vectorStoreId}. Attributes only.`);
+  console.log(`Each request times out after ${input.timeoutMs}ms, with 2 client retries, and the row is abandoned after 3 attempts.`);
+  if (resumeUpdated) console.log(`Resume will skip ${resumeUpdated.size} file ids already logged as updated.`);
+  if (retryFailed) console.log(`Retry will reapply ${retryFailed.size} file ids whose latest log line is failed.`);
 
   for (const row of rows) {
     if (seen.has(row.file_id)) {
@@ -219,6 +250,12 @@ async function applyReviewedCsv(input: {
       continue;
     }
     seen.add(row.file_id);
+    const selection = classifyApplyRow(row.file_id, { resumeUpdated, retryFailed });
+    if (selection.action === "skip") {
+      skipped += 1;
+      if (selection.reason === "already updated") logChange(logPath, `skipped ${row.file_id} already updated`);
+      continue;
+    }
     const decision = attributesForRow(row);
     if (decision.action === "skip") {
       skipped += 1;
@@ -226,11 +263,28 @@ async function applyReviewedCsv(input: {
       continue;
     }
     try {
-      await input.pace();
-      await withBackoff(() => input.openai.vectorStores.files.update(row.file_id, {
-        vector_store_id: input.vectorStoreId,
-        attributes: decision.attributes,
-      }));
+      console.log(`${new Date().toISOString()} updating ${row.file_id}`);
+      await retryOperation(
+        () => {
+          return input.pace().then(() => withDeadline(
+            (signal) => input.openai.vectorStores.files.update(row.file_id, {
+              vector_store_id: input.vectorStoreId,
+              attributes: decision.attributes,
+            }, { signal, timeout: input.timeoutMs, maxRetries: 2 }),
+            attemptBudget,
+          ));
+        },
+        {
+          attempts: 3,
+          delayMs: (failedAttempt) => 1000 * 2 ** (failedAttempt - 1),
+          sleep,
+          onError: (error, failedAttempt) => {
+            if (failedAttempt < 3) {
+              logChange(logPath, `retry ${failedAttempt}/3 ${row.file_id} ${errorMessage(error)}`);
+            }
+          },
+        },
+      );
       updated += 1;
       logChange(logPath, `updated ${row.file_id} ${JSON.stringify(decision.attributes)}`);
     } catch (error) {
@@ -400,7 +454,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function sleep(milliseconds: number) {
+function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 

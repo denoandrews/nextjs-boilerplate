@@ -283,5 +283,7 @@ describe("tagging script safety", () => {
     expect(source).toMatch(/vectorStores\.files\.update\s*\(/);
     expect(source).not.toMatch(/uploadAndPoll|\.upload\s*\(|files\.create|vectorStores\.files\.delete|openai\.files\.delete/);
     expect(source).toMatch(/if \(values\.apply\)/);
+    expect(source).toMatch(/new OpenAI\(\{ apiKey, timeout: timeoutMs, maxRetries: 2 \}\)/);
+    expect(source).toMatch(/attempts: 3/);
   });
 });
