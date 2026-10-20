@@ -69,7 +69,7 @@ create table if not exists public.motions (
   source_file_id text not null,
   source_page integer,
   validation_status text not null default 'needs_review'
-    check (validation_status in ('ok', 'tally_mismatch', 'needs_review')),
+    check (validation_status in ('ok', 'tally_mismatch', 'needs_review', 'count_only')),
   validation_note text,
   created_at timestamptz not null default now()
 );
@@ -152,6 +152,28 @@ do $$ begin
       add constraint meetings_review_status_check
       check (review_status in ('ok', 'needs_review'));
   end if;
+end $$;
+
+-- Replace the validation check so a database that already ran an earlier paste accepts count_only.
+do $$
+declare
+  constraint_name text;
+begin
+  for constraint_name in
+    select con.conname
+    from pg_constraint con
+    join pg_class rel on rel.oid = con.conrelid
+    join pg_namespace nsp on nsp.oid = rel.relnamespace
+    where nsp.nspname = 'public'
+      and rel.relname = 'motions'
+      and con.contype = 'c'
+      and pg_get_constraintdef(con.oid) ilike '%validation_status%'
+  loop
+    execute format('alter table public.motions drop constraint %I', constraint_name);
+  end loop;
+  alter table public.motions
+    add constraint motions_validation_status_check
+    check (validation_status in ('ok', 'tally_mismatch', 'needs_review', 'count_only'));
 end $$;
 
 create index if not exists motions_city_validation_idx

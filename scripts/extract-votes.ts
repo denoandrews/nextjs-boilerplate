@@ -42,6 +42,7 @@ import {
   selectSpread,
   splitJsonlChunks,
   tagCacheTextIsUsable,
+  unreadableMinutesReason,
   type SeedMember,
   type StoredMeeting,
   type VoteMember,
@@ -205,10 +206,11 @@ async function main() {
   writeFileSync(csvPath, meetingsToReviewCsv(meetings));
   const motions = meetings.flatMap((meeting) => meeting.motions);
   const mismatches = motions.filter((motion) => motion.validation_status === "tally_mismatch").length;
+  const countOnly = motions.filter((motion) => motion.validation_status === "count_only").length;
   const review = motions.filter((motion) => motion.validation_status === "needs_review").length;
   const failed = meetings.filter((meeting) => meeting.error).length;
   console.log(`Wrote ${meetings.length} meetings to ${outPath} and ${csvPath}.`);
-  console.log(`Motions: ${motions.length}. tally_mismatch: ${mismatches}. needs_review: ${review}. File errors: ${failed}.`);
+  console.log(`Motions: ${motions.length}. tally_mismatch: ${mismatches}. count_only: ${countOnly}. needs_review: ${review}. File errors: ${failed}.`);
 
   if (values.write) {
     await writeSupabase({ supabaseUrl, supabaseKey, city, meetings, members });
@@ -238,23 +240,25 @@ async function runRegular(context: RunContext, chosen: Candidate[]) {
   let failed = 0;
   for (const candidate of chosen) {
     const cached = context.refresh ? null : readExtractionCache(context.cacheDir, context.vectorStoreId, candidate.fileId);
+    const blocked = blockedMinutesReason(context, candidate.fileId);
     if (context.retryFailed) {
-      if (!cached?.error) {
+      if (!cached?.error && !blocked) {
         skipped += 1;
         continue;
       }
-    } else if (cached && !cached.error) {
+    } else if (cached && !cached.error && !blocked) {
       skipped += 1;
       logChange(context.logPath, `skipped ${candidate.fileId} already extracted`);
       continue;
     }
     try {
       const text = await loadMinutesText(context, candidate);
-      if (!text.text.trim()) {
-        const meeting = failedMeeting({ ...candidateFields(candidate), error: "Vector store content was empty." });
+      const unreadable = unreadableMinutesReason(text.text);
+      if (unreadable) {
+        const meeting = failedMeeting({ ...candidateFields(candidate), error: unreadable });
         writeExtractionCache(context.cacheDir, context.vectorStoreId, meeting);
         failed += 1;
-        logChange(context.logPath, `failed ${candidate.fileId} vector store content was empty`);
+        logChange(context.logPath, `failed ${candidate.fileId} ${unreadable}`);
         continue;
       }
       const response = await callWithTimeout(
@@ -302,7 +306,9 @@ async function runBatch(context: RunContext, chosen: Candidate[], batchWaitMs: n
     const pending = chosen.filter((candidate) => {
       if (attempted.has(candidate.fileId)) return false;
       const cached = context.refresh ? null : readExtractionCache(context.cacheDir, context.vectorStoreId, candidate.fileId);
-      if (context.retryFailed) return Boolean(cached?.error);
+      const blocked = blockedMinutesReason(context, candidate.fileId);
+      if (context.retryFailed) return Boolean(cached?.error) || Boolean(blocked);
+      if (blocked) return true;
       return !cached || Boolean(cached.error);
     });
     if (pending.length === 0) return true;
@@ -310,11 +316,12 @@ async function runBatch(context: RunContext, chosen: Candidate[], batchWaitMs: n
     const lines: string[] = [];
     for (const candidate of pending) {
       const text = await loadMinutesText(context, candidate);
-      if (!text.text.trim()) {
+      const unreadable = unreadableMinutesReason(text.text);
+      if (unreadable) {
         attempted.add(candidate.fileId);
-        const meeting = failedMeeting({ ...candidateFields(candidate), error: "Vector store content was empty." });
+        const meeting = failedMeeting({ ...candidateFields(candidate), error: unreadable });
         writeExtractionCache(context.cacheDir, context.vectorStoreId, meeting);
-        logChange(context.logPath, `failed ${candidate.fileId} vector store content was empty`);
+        logChange(context.logPath, `failed ${candidate.fileId} ${unreadable}`);
         continue;
       }
       lines.push(buildBatchRequestLine(candidate.fileId, promptText(text.text, text.truncated)));
@@ -590,6 +597,12 @@ async function callWithTimeout<T>(
 function promptText(text: string, truncated: boolean): string {
   if (!truncated) return text;
   return `${text}\n\n[The minutes text was truncated. Extract only votes present above.]`;
+}
+
+function blockedMinutesReason(context: RunContext, fileId: string): string | null {
+  const cached = readTextCache(context.cacheDir, context.vectorStoreId, fileId);
+  if (!cached) return null;
+  return unreadableMinutesReason(cached.text);
 }
 
 function candidateFields(candidate: Candidate) {

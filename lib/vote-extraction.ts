@@ -14,7 +14,7 @@ export const BATCH_JSONL_BYTE_LIMIT = 150_000_000;
 export type MinutesStatus = "approved" | "draft" | "revised" | "unknown";
 export type MotionResult = "passed" | "failed" | "tabled" | "withdrawn" | "no_vote" | "unknown";
 export type VoteChoice = "aye" | "nay" | "abstain" | "absent" | "recused";
-export type ValidationStatus = "ok" | "tally_mismatch" | "needs_review";
+export type ValidationStatus = "ok" | "tally_mismatch" | "needs_review" | "count_only";
 export type NameMatchStatus = "matched" | "unknown" | "ambiguous";
 
 const MINUTES_STATUSES: MinutesStatus[] = ["approved", "draft", "revised", "unknown"];
@@ -143,9 +143,13 @@ Rules:
 - body is the board or commission that met, such as Village Board.
 - minutes_status is approved, draft, revised, or unknown.
 - One object per motion. A consent agenda stays one motion. Do not split it into guessed items.
-- A voice vote or a motion with no names has a result and a note, and votes is an empty array. Do not invent member rows.
+- Add a votes row for every name the roll call lists. That includes every absent, abstain, and recused name. Do not drop those names.
+- Never take counts from meeting attendance. Who was present at the meeting is not the vote on a motion.
+- For a voice vote, or when the minutes say unanimous and give no names and no numbers, leave every tally count null and leave votes empty. Do not invent a 7-0 or any other roll call.
+- tally_text is the printed aye-nay split exactly, such as 6-1 or 7-0, or null. Never put a 5-part string in tally_text.
+- The tally counts must equal the member rows you listed. Use null for a count the minutes do not print on that vote.
+- ABSTAIN is abstain. Use recused only when the line says RECUSED.
 - choice is aye, nay, abstain, absent, or recused. Map yes and yea to aye. Map no to nay.
-- tally_text is the printed split, such as 6-1 or 7-0, or null. The tally counts must equal the member rows. Use null for a count the minutes do not print.
 - source_page is an integer only when the text itself shows that page number. Otherwise null.
 - A clerk who is not in the roll call is not a voting member.`;
 
@@ -368,6 +372,19 @@ export function countChoices(votes: { choice: VoteChoice }[]): Record<VoteChoice
   return counts;
 }
 
+export type TallyCheckStatus = "ok" | "tally_mismatch" | "needs_review" | "count_only";
+
+function ayeNaySplit(text: string): { aye: number; nay: number } | null {
+  const match = /^\s*(\d+)\s*[-–—]\s*(\d+)\s*$/.exec(text);
+  if (!match) return null;
+  return { aye: Number(match[1]), nay: Number(match[2]) };
+}
+
+function isMultiPartCount(text: string): boolean {
+  const parts = text.split(/[-–—]/).map((part) => part.trim()).filter(Boolean);
+  return parts.length > 2 && parts.every((part) => /^\d+$/.test(part));
+}
+
 export function validateTally(motion: {
   tally_aye: number | null;
   tally_nay: number | null;
@@ -377,64 +394,92 @@ export function validateTally(motion: {
   tally_text: string | null;
   note: string | null;
   votes: { choice: VoteChoice }[];
-}): { status: "ok" | "tally_mismatch"; note: string } {
+}): { status: TallyCheckStatus; note: string } {
   const counts = countChoices(motion.votes);
   const problems: string[] = [];
-  const fields: [VoteChoice, number | null][] = [
-    ["aye", motion.tally_aye],
-    ["nay", motion.tally_nay],
-    ["abstain", motion.tally_abstain],
-    ["absent", motion.tally_absent],
-    ["recused", motion.tally_recused],
-  ];
-  for (const [choice, printed] of fields) {
-    if (printed == null) continue;
-    if (!Number.isInteger(printed) || printed < 0 || printed !== counts[choice]) {
-      problems.push(`tally_${choice} is ${printed} but ${counts[choice]} ${choice} names were listed`);
+  const notes: string[] = [];
+  const text = motion.tally_text?.trim() ?? "";
+  const split = ayeNaySplit(text);
+  const noNames = motion.votes.length === 0;
+
+  if (motion.tally_absent != null && motion.tally_absent !== counts.absent) {
+    const listed = counts.absent === 0 ? "no absent names were listed" : `${counts.absent} absent names were listed`;
+    notes.push(`tally_absent is ${motion.tally_absent} but ${listed}`);
+  }
+
+  if (!noNames) {
+    const strictFields: [string, number | null, number][] = [
+      ["aye", motion.tally_aye, counts.aye],
+      ["nay", motion.tally_nay, counts.nay],
+      ["abstain", motion.tally_abstain, counts.abstain],
+      ["recused", motion.tally_recused, counts.recused],
+    ];
+    for (const [choice, printed, count] of strictFields) {
+      if (printed == null) continue;
+      if (!Number.isInteger(printed) || printed < 0 || printed !== count) {
+        problems.push(`tally_${choice} is ${printed} but ${count} ${choice} names were listed`);
+      }
+    }
+    if (split && (split.aye !== counts.aye || split.nay !== counts.nay)) {
+      problems.push(`printed ${split.aye}-${split.nay} does not match ${counts.aye} aye and ${counts.nay} nay`);
+    }
+  } else if (split) {
+    if (motion.tally_aye != null && motion.tally_aye !== split.aye) {
+      problems.push(`tally_aye is ${motion.tally_aye} but the printed split is ${split.aye}-${split.nay}`);
+    }
+    if (motion.tally_nay != null && motion.tally_nay !== split.nay) {
+      problems.push(`tally_nay is ${motion.tally_nay} but the printed split is ${split.aye}-${split.nay}`);
     }
   }
 
-  const text = motion.tally_text?.trim() ?? "";
-  const split = /(\d+)\s*[-–—]\s*(\d+)/.exec(text);
-  if (split) {
-    const aye = Number(split[1]);
-    const nay = Number(split[2]);
-    if (aye !== counts.aye || nay !== counts.nay) {
-      problems.push(`printed ${aye}-${nay} does not match ${counts.aye} aye and ${counts.nay} nay`);
-    }
-    if (motion.votes.length === 0) problems.push(`printed ${aye}-${nay} has no member rows`);
-  }
   if (/\bunanimous\b/i.test(text) && counts.nay > 0) {
     problems.push("printed unanimous does not match a nay");
   }
-  if (fields.some(([, printed]) => printed != null && printed > 0) && motion.votes.length === 0) {
-    problems.push("tally counts were given without member rows");
+  if (isMultiPartCount(text)) {
+    notes.push("tally_text must be the aye-nay split only, such as 6-1, not a longer count string.");
   }
 
   const claim = `${motion.note ?? ""} ${motion.tally_text ?? ""}`;
   const unanimous = motion.votes.length > 0 && counts.nay === 0 && counts.aye > 0
-    && (split ? Number(split[2]) === 0 : counts.abstain === 0 && counts.recused === 0);
+    && (split ? split.nay === 0 : counts.abstain === 0 && counts.recused === 0);
   if (TWO_PERSON_CLAIM.test(claim) && unanimous) {
     problems.push("a unanimous vote cannot be stored as a two-person split");
   }
 
-  if (problems.length > 0) return { status: "tally_mismatch", note: problems.join("; ") };
-  if (motion.votes.length === 0 && !split) {
-    return { status: "ok", note: "No member rows and no printed split. Treated as a voice vote or a motion without a roll call." };
+  const combined = [...problems, ...notes].join("; ");
+  if (problems.length > 0) return { status: "tally_mismatch", note: combined };
+  if (noNames && split) {
+    return { status: "count_only", note: [`Printed ${split.aye}-${split.nay} has no member names.`, ...notes].filter(Boolean).join(" ") };
   }
-  return { status: "ok", note: "" };
+  if (noNames && (isMultiPartCount(text) || [motion.tally_aye, motion.tally_nay, motion.tally_abstain, motion.tally_recused, motion.tally_absent].some((count) => count != null && count > 0))) {
+    return { status: "needs_review", note: combined || "Counts were given without member names or an aye-nay split." };
+  }
+  if (noNames) {
+    return { status: "ok", note: notes.join("; ") || "No member rows and no printed split. Treated as a voice vote or a motion without a roll call." };
+  }
+  return { status: "ok", note: notes.join("; ") };
 }
 
 export function validationStatus(input: {
-  tally: "ok" | "tally_mismatch";
+  tally: TallyCheckStatus;
   unknownOrAmbiguousName: boolean;
   dateDisagrees: boolean;
   untagged: boolean;
   missingDate: boolean;
 }): ValidationStatus {
   if (input.tally === "tally_mismatch") return "tally_mismatch";
-  if (input.unknownOrAmbiguousName || input.dateDisagrees || input.untagged || input.missingDate) return "needs_review";
+  if (input.tally === "count_only") return "count_only";
+  if (input.tally === "needs_review" || input.unknownOrAmbiguousName || input.dateDisagrees || input.untagged || input.missingDate) {
+    return "needs_review";
+  }
   return "ok";
+}
+
+/** Empty text, or the vector-store placeholder for an image-only file, must not be sent to the model. */
+export function unreadableMinutesReason(text: string): string | null {
+  if (!text.trim()) return "Vector store content was empty.";
+  if (text.includes("No text could be parsed")) return "Vector store content had no parseable text.";
+  return null;
 }
 
 export function recordDateToIso(recordDate: number | null): string | null {

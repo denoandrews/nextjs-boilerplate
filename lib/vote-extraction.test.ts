@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  EXTRACTION_INSTRUCTIONS,
   EXTRACT_MODEL,
   VOTE_EXTRACTION_SCHEMA,
   applyDedupe,
@@ -15,6 +16,7 @@ import {
   normalizePersonName,
   oakParkSeedMembers,
   selectSpread,
+  unreadableMinutesReason,
   validateTally,
   type ParsedExtraction,
   type StoredMeeting,
@@ -159,8 +161,67 @@ describe("tally validation", () => {
     expect(result.note).toMatch(/voice vote/i);
   });
 
-  it("rejects a printed split that has no member rows", () => {
-    expect(validateTally(tallyMotion({ tally_text: "4-2" })).status).toBe("tally_mismatch");
+  it("keeps a printed split with no names out of the mismatch pile", () => {
+    const result = validateTally(tallyMotion({ tally_text: "4-2", tally_aye: 4, tally_nay: 2 }));
+    expect(result.status).toBe("count_only");
+    expect(result.note).toMatch(/no member names/);
+  });
+
+  it("notes an absent count without absent names and still checks ayes and nays", () => {
+    const noted = validateTally(tallyMotion({
+      tally_text: "6-1",
+      tally_aye: 6,
+      tally_nay: 1,
+      tally_absent: 1,
+      votes: votes([
+        ["Andrews", "aye"],
+        ["Buchanan", "aye"],
+        ["Enyia", "aye"],
+        ["Parakkat", "aye"],
+        ["Scaman", "aye"],
+        ["Straw", "aye"],
+        ["Walker-Peddakotla", "nay"],
+      ]),
+    }));
+    expect(noted.status).toBe("ok");
+    expect(noted.note).toMatch(/no absent names/);
+
+    const mismatch = validateTally(tallyMotion({
+      tally_text: "6-1",
+      tally_absent: 1,
+      votes: votes([
+        ["Andrews", "nay"],
+        ["Walker-Peddakotla", "nay"],
+      ]),
+    }));
+    expect(mismatch.status).toBe("tally_mismatch");
+    expect(mismatch.note).toMatch(/6-1/);
+  });
+
+  it("leaves a unanimous line with no names and no numbers as an empty voice vote", () => {
+    const result = validateTally(tallyMotion({ tally_text: "unanimous", note: "Unanimous voice vote." }));
+    expect(result.status).toBe("ok");
+    expect(result.note).toMatch(/voice vote/i);
+  });
+});
+
+describe("extraction instructions", () => {
+  it("tells the model how to list absences and how to leave a voice vote empty", () => {
+    expect(EXTRACTION_INSTRUCTIONS).toMatch(/absent, abstain, and recused/);
+    expect(EXTRACTION_INSTRUCTIONS).toMatch(/Never take counts from meeting attendance/);
+    expect(EXTRACTION_INSTRUCTIONS).toMatch(/leave every tally count null and leave votes empty/);
+    expect(EXTRACTION_INSTRUCTIONS).toMatch(/Never put a 5-part string/);
+    expect(EXTRACTION_INSTRUCTIONS).toMatch(/ABSTAIN is abstain/);
+    expect(EXTRACTION_INSTRUCTIONS).toMatch(/only when the line says RECUSED/);
+  });
+});
+
+describe("unreadable minutes", () => {
+  it("skips empty text and image-only placeholders before extraction", () => {
+    expect(unreadableMinutesReason("")).toMatch(/empty/);
+    expect(unreadableMinutesReason("   ")).toMatch(/empty/);
+    expect(unreadableMinutesReason("No text could be parsed from this file.")).toMatch(/no parseable text/);
+    expect(unreadableMinutesReason("The motion passed 6-1. Trustee Andrews voted nay.")).toBeNull();
   });
 });
 
@@ -406,5 +467,7 @@ describe("extract-votes script safety", () => {
     expect(source).toMatch(/maxRetries:\s*2/);
     expect(source).not.toMatch(/query_votes|app\/api\/chat/);
     expect(source).toContain('"/v1/responses"');
+    expect(source).toMatch(/unreadableMinutesReason\(text\.text\)/);
+    expect(source).not.toMatch(/if \(!text\.text\.trim\(\)\)/);
   });
 });
