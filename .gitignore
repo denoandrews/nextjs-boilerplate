@@ -45,3 +45,10 @@ next-env.d.ts
 .vector-store-tag-cache/
 vector-store-tags.csv
 *.apply.log
+
+# roll-call extraction output
+.vote-extract-cache/
+*.extract.log
+*.review.csv
+*-votes.jsonl
+*-votes-pilot.jsonl
