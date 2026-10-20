@@ -74,6 +74,39 @@ describe("municipal clock and instructions", () => {
     expect(instructions).not.toContain("Wednesday Journal");
   });
 
+  it("treats vote tallies and exhaustive lists as a sample, not a complete search", () => {
+    const instructions = buildChatInstructions({
+      municipalityName: "Village of Oak Park",
+      slug: "oak-park-il",
+      newsEnabled: true,
+      question: "Find every time only two trustees voted together, both yes with everyone else no, or both no with everyone else yes.",
+    });
+    expect(instructions).toContain("this rule overrides rule 1");
+    expect(instructions).toContain("records retrieved for this answer are only a sample");
+    expect(instructions).toContain("about 16 snippets");
+    expect(instructions).toContain("cannot give a complete list");
+    expect(instructions).toContain("every time");
+    expect(instructions).toContain("all votes where");
+    expect(instructions).toContain("how many times");
+    expect(instructions).toContain("matrix of votes");
+    expect(instructions).toContain("strictly meet the user's stated criteria");
+    expect(instructions).toContain("none were found in the retrieved records");
+    expect(instructions).toContain("You cannot keep searching");
+    expect(instructions).toContain("broader or later search");
+    expect(instructions).toContain("fuller matrix");
+    expect(instructions).toContain("email anyone");
+    expect(instructions).toContain("tally must match the names");
+    expect(instructions).toContain("6-1 vote has one person on the minority side");
+    expect(instructions).toContain("two named nays");
+    expect(instructions).toContain("unanimous vote, including a 7-0 or 6-0");
+    expect(instructions).toContain("number of names on each side must equal the numbers in the split");
+    expect(instructions).toContain("A 4-2 vote is not that case");
+    expect(instructions).toContain("two named members voting yes");
+    expect(instructions).toContain("every other member voting no");
+    expect(instructions).toContain("unless the records retrieved for this turn support it");
+    expect(instructions).toContain("say the correction plainly");
+  });
+
   it("gives reasoning models a higher default output budget", () => {
     expect(getMaxOutputTokens("gpt-4.1-mini")).toBe(800);
     expect(getMaxOutputTokens("gpt-5.4-mini")).toBe(1600);
