@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -14,7 +15,11 @@ import {
   matchMemberName,
   membersFromSeed,
   normalizePersonName,
+  EXTRACTION_VERSION,
+  cacheReuseSummary,
+  extractionFingerprint,
   oakParkSeedMembers,
+  revalidateMeeting,
   selectSpread,
   unreadableMinutesReason,
   validateTally,
@@ -211,8 +216,119 @@ describe("extraction instructions", () => {
     expect(EXTRACTION_INSTRUCTIONS).toMatch(/Never take counts from meeting attendance/);
     expect(EXTRACTION_INSTRUCTIONS).toMatch(/leave every tally count null and leave votes empty/);
     expect(EXTRACTION_INSTRUCTIONS).toMatch(/Never put a 5-part string/);
-    expect(EXTRACTION_INSTRUCTIONS).toMatch(/ABSTAIN is abstain/);
+    expect(EXTRACTION_INSTRUCTIONS).toMatch(/ABSTAIN means abstain/);
     expect(EXTRACTION_INSTRUCTIONS).toMatch(/only when the line says RECUSED/);
+    expect(EXTRACTION_INSTRUCTIONS).toMatch(/printed roll call has a label \(ABSTAIN, RECUSED, PRESENT\)/);
+    expect(EXTRACTION_INSTRUCTIONS).toMatch(/even if the narrative says otherwise/);
+    expect(EXTRACTION_INSTRUCTIONS).toMatch(/tally_text is the aye-nay split only/);
+  });
+});
+
+describe("extraction version", () => {
+  it("hashes the system prompt, JSON schema, and model id", () => {
+    const expected = createHash("sha256").update(extractionFingerprint()).digest("hex");
+    expect(EXTRACTION_VERSION).toBe(expected);
+    expect(extractionFingerprint()).toContain(EXTRACT_MODEL);
+    expect(extractionFingerprint()).toContain(JSON.stringify(VOTE_EXTRACTION_SCHEMA));
+  });
+
+  it("says which cached version was reused", () => {
+    expect(cacheReuseSummary({
+      currentVersion: EXTRACTION_VERSION,
+      reused: [EXTRACTION_VERSION, EXTRACTION_VERSION],
+      stale: ["", "old-version"],
+    })).toBe(
+      `Reused 2 cached results from extraction version ${EXTRACTION_VERSION} (2). Ignored 2 cached results from extraction version (none), old-version because it does not match ${EXTRACTION_VERSION}.`,
+    );
+    expect(cacheReuseSummary({ currentVersion: EXTRACTION_VERSION, reused: [], stale: [] }))
+      .toBe(`Reused 0 cached results. Current extraction version is ${EXTRACTION_VERSION}.`);
+  });
+});
+
+describe("revalidateMeeting", () => {
+  it("recomputes a stale tally_mismatch from the current absent rule", () => {
+    const meeting: StoredMeeting = {
+      file_id: "file-old",
+      filename: "2014-11-17_VillageBoard_Minutes.pdf",
+      record_date: 20141117,
+      untagged: false,
+      truncated: false,
+      meeting_date: "2014-11-17",
+      body: "Village Board",
+      minutes_status: "approved",
+      date_disagrees: false,
+      review_status: "ok",
+      review_note: null,
+      superseded_by: null,
+      error: null,
+      extraction_version: "old",
+      motions: [{
+        item_key: "item",
+        item_number: "1",
+        title: "Ordinance",
+        motion_text: null,
+        mover_raw: null,
+        seconder_raw: null,
+        mover_member_id: null,
+        seconder_member_id: null,
+        result: "passed",
+        tally_aye: 6,
+        tally_nay: 0,
+        tally_abstain: 1,
+        tally_absent: 1,
+        tally_recused: 0,
+        tally_text: "6-0",
+        source_page: null,
+        validation_status: "tally_mismatch",
+        validation_note: "tally_absent is 1 but no absent names were listed",
+        votes: [
+          { raw_name: "President Abu-Taleb", choice: "abstain", member_id: "abu-taleb", match: "matched" },
+          { raw_name: "Trustee Salzman", choice: "aye", member_id: "salzman", match: "matched" },
+          { raw_name: "Trustee Tucker", choice: "aye", member_id: "tucker", match: "matched" },
+          { raw_name: "Trustee Brewer", choice: "aye", member_id: "brewer", match: "matched" },
+          { raw_name: "Trustee Johnson", choice: "aye", member_id: "johnson", match: "matched" },
+          { raw_name: "Trustee Lueck", choice: "aye", member_id: "lueck", match: "matched" },
+          { raw_name: "Trustee Ott", choice: "aye", member_id: "ott", match: "matched" },
+        ],
+      }],
+    };
+    const checked = revalidateMeeting(meeting);
+    expect(checked.motions[0].validation_status).toBe("ok");
+    expect(checked.motions[0].validation_note).toMatch(/no absent names/);
+    expect(checked.extraction_version).toBe("old");
+  });
+});
+
+describe("Nov 17 2014 Village Board", () => {
+  it("keeps President Abu-Taleb as abstain 1 and recused 0 when the printed label is ABSTAIN", () => {
+    const ayes = ["Trustee Salzman", "Trustee Tucker", "Trustee Brewer", "Trustee Johnson", "Trustee Lueck", "Trustee Ott"] as const;
+    const correct = validateTally(tallyMotion({
+      tally_text: "6-0",
+      tally_aye: 6,
+      tally_nay: 0,
+      tally_abstain: 1,
+      tally_recused: 0,
+      note: "The narrative said President Abu-Taleb recused himself.",
+      votes: votes([
+        ...ayes.map((name) => [name, "aye"] as [string, VoteChoice]),
+        ["President Abu-Taleb", "abstain"],
+      ]),
+    }));
+    expect(correct.status).toBe("ok");
+    expect(correct.note).not.toMatch(/recused/);
+
+    const fromNarrative = validateTally(tallyMotion({
+      tally_text: "6-0",
+      tally_aye: 6,
+      tally_nay: 0,
+      tally_abstain: 1,
+      tally_recused: 0,
+      votes: votes([
+        ...ayes.map((name) => [name, "aye"] as [string, VoteChoice]),
+        ["President Abu-Taleb", "recused"],
+      ]),
+    }));
+    expect(fromNarrative.status).toBe("tally_mismatch");
   });
 });
 
@@ -380,6 +496,7 @@ describe("draft versus approved dedupe", () => {
       review_note: null,
       superseded_by: null,
       error: null,
+      extraction_version: EXTRACTION_VERSION,
       motions: [{
         item_key: "item",
         item_number: "1",
@@ -467,6 +584,7 @@ describe("extract-votes script safety", () => {
     expect(source).toMatch(/maxRetries:\s*2/);
     expect(source).not.toMatch(/query_votes|app\/api\/chat/);
     expect(source).toContain('"/v1/responses"');
+    expect(source).toMatch(/applyDedupe\(chosen\.map\(\(candidate\) => revalidateMeeting\(/);
     expect(source).toMatch(/unreadableMinutesReason\(text\.text\)/);
     expect(source).not.toMatch(/if \(!text\.text\.trim\(\)\)/);
   });

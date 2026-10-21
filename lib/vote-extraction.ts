@@ -83,6 +83,8 @@ export type StoredMeeting = {
   review_note: string | null;
   superseded_by: string | null;
   error: string | null;
+  /** Hash of the prompt, JSON schema, and model. An older hash is a cache miss. */
+  extraction_version: string;
   motions: StoredMotion[];
 };
 
@@ -148,7 +150,7 @@ Rules:
 - For a voice vote, or when the minutes say unanimous and give no names and no numbers, leave every tally count null and leave votes empty. Do not invent a 7-0 or any other roll call.
 - tally_text is the printed aye-nay split exactly, such as 6-1 or 7-0, or null. Never put a 5-part string in tally_text.
 - The tally counts must equal the member rows you listed. Use null for a count the minutes do not print on that vote.
-- ABSTAIN is abstain. Use recused only when the line says RECUSED.
+- When the printed roll call has a label (ABSTAIN, RECUSED, PRESENT), use that label for both the vote choice and the count, even if the narrative says otherwise. ABSTAIN means abstain. Use recused only when the line says RECUSED. PRESENT is not abstain or recused. tally_text is the aye-nay split only.
 - choice is aye, nay, abstain, absent, or recused. Map yes and yea to aye. Map no to nay.
 - source_page is an integer only when the text itself shows that page number. Otherwise null.
 - A clerk who is not in the roll call is not a voting member.`;
@@ -218,6 +220,39 @@ export const VOTE_EXTRACTION_SCHEMA = {
     },
   },
 } as const;
+
+export function extractionFingerprint(): string {
+  return JSON.stringify({
+    model: EXTRACT_MODEL,
+    instructions: EXTRACTION_INSTRUCTIONS,
+    schema: VOTE_EXTRACTION_SCHEMA,
+  });
+}
+
+/** Changes when the system prompt, JSON schema, or model id changes. */
+export const EXTRACTION_VERSION = createHash("sha256").update(extractionFingerprint()).digest("hex");
+
+export function extractionVersionMatches(version: string | null | undefined): boolean {
+  return version === EXTRACTION_VERSION;
+}
+
+export function cacheReuseSummary(input: { currentVersion: string; reused: string[]; stale: string[] }): string {
+  const reusedFrom = formatVersions(input.reused);
+  const reusedLine = input.reused.length > 0
+    ? `Reused ${input.reused.length} cached results from extraction version ${reusedFrom}.`
+    : `Reused 0 cached results. Current extraction version is ${input.currentVersion}.`;
+  if (input.stale.length === 0) return reusedLine;
+  return `${reusedLine} Ignored ${input.stale.length} cached results from extraction version ${formatVersions(input.stale)} because it does not match ${input.currentVersion}.`;
+}
+
+function formatVersions(versions: string[]): string {
+  const counts = new Map<string, number>();
+  for (const version of versions) {
+    const label = version || "(none)";
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([version, count]) => count > 1 ? `${version} (${count})` : version).join(", ");
+}
 
 export function extractionResponseBody(minutesText: string): {
   model: string;
@@ -834,7 +869,44 @@ export function finalizeMeeting(input: {
     review_note: joinNotes(reviewNotes) || null,
     superseded_by: null,
     error: input.error ?? null,
+    extraction_version: EXTRACTION_VERSION,
     motions,
+  };
+}
+
+export function revalidateMeeting(meeting: StoredMeeting): StoredMeeting {
+  const missingDate = meeting.meeting_date == null;
+  return {
+    ...meeting,
+    motions: meeting.motions.map((motion) => {
+      const tally = validateTally({
+        tally_aye: motion.tally_aye,
+        tally_nay: motion.tally_nay,
+        tally_abstain: motion.tally_abstain,
+        tally_absent: motion.tally_absent,
+        tally_recused: motion.tally_recused,
+        tally_text: motion.tally_text,
+        note: null,
+        votes: motion.votes,
+      });
+      const unknownOrAmbiguousName = motion.votes.some((vote) => vote.match !== "matched") && motion.votes.length > 0;
+      const nameNotes = motion.votes.flatMap((vote) => {
+        if (vote.match === "unknown") return [`Unknown name: ${vote.raw_name}.`];
+        if (vote.match === "ambiguous") return [`Ambiguous name: ${vote.raw_name} matches more than one member.`];
+        return [];
+      });
+      return {
+        ...motion,
+        validation_status: validationStatus({
+          tally: tally.status,
+          unknownOrAmbiguousName,
+          dateDisagrees: meeting.date_disagrees,
+          untagged: meeting.untagged,
+          missingDate,
+        }),
+        validation_note: joinNotes([tally.note, ...nameNotes]),
+      };
+    }),
   };
 }
 
@@ -859,6 +931,7 @@ export function failedMeeting(input: {
     review_note: input.error,
     superseded_by: null,
     error: input.error,
+    extraction_version: EXTRACTION_VERSION,
     motions: [],
   };
 }

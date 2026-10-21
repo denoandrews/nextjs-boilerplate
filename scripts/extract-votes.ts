@@ -25,7 +25,10 @@ import {
   attributeRecordDate,
   buildBatchRequestLine,
   classifyMinutesCandidate,
+  EXTRACTION_VERSION,
+  cacheReuseSummary,
   extractionResponseBody,
+  extractionVersionMatches,
   failedMeeting,
   finalizeMeeting,
   isStoredMeeting,
@@ -38,6 +41,7 @@ import {
   oakParkSeedMembers,
   parseExtractionJson,
   readBatchOutputLine,
+  revalidateMeeting,
   reviewCsvPath,
   selectSpread,
   splitJsonlChunks,
@@ -163,7 +167,7 @@ async function main() {
   const pace = createPacer(delayMs);
   const attemptBudget = applyAttemptBudgetMs(timeoutMs, 2);
 
-  console.log(`Extracting roll-call votes with ${EXTRACT_MODEL} from ${vectorStoreId}.`);
+  console.log(`Extracting roll-call votes with ${EXTRACT_MODEL} from ${vectorStoreId}. Extraction version ${EXTRACTION_VERSION}.`);
   console.log("Municipal files are not uploaded or deleted. Supabase is updated only with --write.");
   console.log(`Each request times out after ${timeoutMs}ms, with 2 client retries, and a file is abandoned after 3 attempts.`);
   if (values.pilot) console.log(`Pilot: ${limit} files spread across years, using the regular API.`);
@@ -194,14 +198,14 @@ async function main() {
     return;
   }
 
-  const meetings = applyDedupe(chosen.map((candidate) => readExtractionCache(cacheDir, vectorStoreId, candidate.fileId)
+  const meetings = applyDedupe(chosen.map((candidate) => revalidateMeeting(readExtractionCache(cacheDir, vectorStoreId, candidate.fileId)
     ?? failedMeeting({
       fileId: candidate.fileId,
       filename: candidate.filename,
       recordDate: candidate.recordDate,
       untagged: candidate.untagged,
       error: "This file was not extracted.",
-    })));
+    }))));
   writeFileSync(outPath, meetingsToJsonl(meetings));
   writeFileSync(csvPath, meetingsToReviewCsv(meetings));
   const motions = meetings.flatMap((meeting) => meeting.motions);
@@ -238,18 +242,23 @@ async function runRegular(context: RunContext, chosen: Candidate[]) {
   let extracted = 0;
   let skipped = 0;
   let failed = 0;
+  logCacheReuse(context, chosen);
   for (const candidate of chosen) {
     const cached = context.refresh ? null : readExtractionCache(context.cacheDir, context.vectorStoreId, candidate.fileId);
+    const current = cached && extractionVersionMatches(cached.extraction_version) ? cached : null;
     const blocked = blockedMinutesReason(context, candidate.fileId);
     if (context.retryFailed) {
-      if (!cached?.error && !blocked) {
+      if (current && !current.error && !blocked) {
         skipped += 1;
         continue;
       }
-    } else if (cached && !cached.error && !blocked) {
+    } else if (current && !current.error && !blocked) {
       skipped += 1;
-      logChange(context.logPath, `skipped ${candidate.fileId} already extracted`);
+      logChange(context.logPath, `skipped ${candidate.fileId} reused extraction version ${current.extraction_version}`);
       continue;
+    }
+    if (cached && !current) {
+      logChange(context.logPath, `extracting ${candidate.fileId} cache version ${cached.extraction_version || "(none)"} does not match ${EXTRACTION_VERSION}`);
     }
     try {
       const text = await loadMinutesText(context, candidate);
@@ -292,6 +301,7 @@ async function runRegular(context: RunContext, chosen: Candidate[]) {
 
 async function runBatch(context: RunContext, chosen: Candidate[], batchWaitMs: number): Promise<boolean> {
   const deadline = Date.now() + batchWaitMs;
+  logCacheReuse(context, chosen);
   const byId = new Map(chosen.map((candidate) => [candidate.fileId, candidate]));
   const attempted = new Set<string>();
   let state = readBatchState(context.cacheDir, context.vectorStoreId);
@@ -306,10 +316,11 @@ async function runBatch(context: RunContext, chosen: Candidate[], batchWaitMs: n
     const pending = chosen.filter((candidate) => {
       if (attempted.has(candidate.fileId)) return false;
       const cached = context.refresh ? null : readExtractionCache(context.cacheDir, context.vectorStoreId, candidate.fileId);
+      const current = cached && extractionVersionMatches(cached.extraction_version) ? cached : null;
       const blocked = blockedMinutesReason(context, candidate.fileId);
-      if (context.retryFailed) return Boolean(cached?.error) || Boolean(blocked);
+      if (context.retryFailed) return !current || Boolean(current.error) || Boolean(blocked);
       if (blocked) return true;
-      return !cached || Boolean(cached.error);
+      return !current || Boolean(current.error);
     });
     if (pending.length === 0) return true;
 
@@ -599,6 +610,23 @@ function promptText(text: string, truncated: boolean): string {
   return `${text}\n\n[The minutes text was truncated. Extract only votes present above.]`;
 }
 
+function logCacheReuse(context: RunContext, chosen: Candidate[]) {
+  const reused: string[] = [];
+  const stale: string[] = [];
+  if (!context.refresh) {
+    for (const candidate of chosen) {
+      const cached = readExtractionCache(context.cacheDir, context.vectorStoreId, candidate.fileId);
+      if (!cached) continue;
+      if (extractionVersionMatches(cached.extraction_version)) {
+        if (!cached.error) reused.push(cached.extraction_version);
+      } else {
+        stale.push(cached.extraction_version);
+      }
+    }
+  }
+  console.log(cacheReuseSummary({ currentVersion: EXTRACTION_VERSION, reused, stale }));
+}
+
 function blockedMinutesReason(context: RunContext, fileId: string): string | null {
   const cached = readTextCache(context.cacheDir, context.vectorStoreId, fileId);
   if (!cached) return null;
@@ -832,7 +860,8 @@ function cachePaths(cacheDir: string, vectorStoreId: string, fileId: string) {
 function readExtractionCache(cacheDir: string, vectorStoreId: string, fileId: string): StoredMeeting | null {
   try {
     const parsed = JSON.parse(readFileSync(cachePaths(cacheDir, vectorStoreId, fileId).extraction, "utf8")) as unknown;
-    return isStoredMeeting(parsed) ? parsed : null;
+    if (!isStoredMeeting(parsed)) return null;
+    return { ...parsed, extraction_version: typeof parsed.extraction_version === "string" ? parsed.extraction_version : "" };
   } catch {
     return null;
   }
