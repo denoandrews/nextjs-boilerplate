@@ -171,6 +171,41 @@ npm run tag-vector-store -- --apply oak-park-tags.csv --retry-failed oak-park-ta
 
 `--delay-ms 200` is the pause between API calls. `--refresh` ignores the text cache. `--limit 20` scans a short sample; do not treat that CSV as the full store. The same commands work for a later city by changing `MUNICIPALITY_SLUG` and `VECTOR_STORE_ID`.
 
+## Extract roll-call votes
+
+`npm run extract-votes` reads minutes that are already in a vector store and writes a JSONL file plus a review CSV. It does not change chat, and it does not upload or delete municipal files. The chat query tool is not part of this step.
+
+Supabase is already running, but its REST API cannot apply this DDL. In the Supabase SQL editor, paste `supabase/migrations/20261020150000_roll_call_votes.sql` and run it once. That SQL is safe to run again. It creates `vote_members`, `meetings`, `motions`, and `member_votes`, enables row level security, and lets municipality members read. Only the service role can insert or update.
+
+The pilot uses the regular API, costs a few dollars, and does not write to Supabase. It picks 20 minutes files spread across years. Tagged `document_type=minutes` files are selected first. Untagged files whose names contain "minutes" are included and marked for review. Agendas, proposals, and studies are skipped. Text comes from the vector-store file content endpoint.
+
+```bash
+export OPENAI_API_KEY="sk-..."
+export VECTOR_STORE_ID="vs_697291646f88819190c616d2a4c98955"
+export MUNICIPALITY_SLUG="oak-park-il"
+
+npm run extract-votes -- --pilot --out oak-park-votes-pilot.jsonl
+```
+
+Review `oak-park-votes-pilot.review.csv`. Check the tally against the names, and the motion title against the minutes. `tally_mismatch` means the aye and nay names do not match the printed split. `count_only` means the minutes printed a split and no names. An absent count with no absent names is a note, not a mismatch. `needs_review` means an unknown member, a date that does not match `record_date`, an untagged file, or two approved files for the same meeting. The Oak Park alias list shipped with the script is only Andrews, Scaman, and Walker-Peddakotla. Other trustees stay `needs_review` until you pass a reviewed `--aliases` JSON file. A voice vote, or the word unanimous with no names and no numbers, stays empty. A file with no text, or text that says "No text could be parsed", is recorded as an error and is not sent to the model. If the SQL was pasted before `count_only` existed, paste the same migration again before `--write`.
+
+Each OpenAI call uses a 120 second timeout (`--timeout-ms`) and 2 client retries. A file that still fails is tried 3 times, then logged, and the script moves on. A later run reuses a cached file only when its extraction version matches the current prompt, schema, and model. A different version is extracted again. Tallies are checked again before the CSV is written. `--refresh` extracts every selected file again. `--retry-failed` reruns only files whose last extraction failed. `--limit 10` with `--pilot` spreads 10 files instead of 20.
+
+After the CSV looks right and the SQL above has been applied, this is the command that upserts. It matches meetings on municipality plus source file, motions on meeting plus item key, and member votes on motion plus the raw name.
+
+```bash
+export SUPABASE_URL="https://YOUR_PROJECT.supabase.co"
+export SUPABASE_SERVICE_ROLE_KEY="..."
+
+npm run extract-votes -- --write --out oak-park-votes-pilot.jsonl
+```
+
+The full run was approved at about $10–25 with the Batch API. Use it only after the pilot looks right. The command submits the batch and returns while OpenAI is still working. Run it again to collect the finished batch and write the CSV. Add `--write` only when that CSV is reviewed.
+
+```bash
+npm run extract-votes -- --batch --out oak-park-votes.jsonl
+```
+
 ## Still required before selling
 
 - Provision the production Supabase project and apply the migration.
