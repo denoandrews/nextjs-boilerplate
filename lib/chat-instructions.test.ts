@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildChatInstructions, getMaxOutputTokens, municipalClock, timeZoneForSlug } from "./chat-instructions";
+import { FILE_SEARCH_MAX_RESULTS } from "./file-search";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -40,6 +41,12 @@ describe("municipal clock and instructions", () => {
     expect(instructions).toContain("2020 Remedial Action Plan");
     expect(instructions).toContain("2017-09-18 agenda is older than a 2026-10-13 agenda");
     expect(instructions).toContain("Minutes dated 2025-05-06 are newer than a decision dated May 15, 2023");
+    expect(instructions).toContain("Work through each part of a multi-part question");
+    expect(instructions).toContain("say when sources conflict");
+    expect(instructions).toContain("record_date is an 8-digit number YYYYMMDD");
+    expect(instructions).toContain("20261013 is October 13, 2026");
+    expect(instructions).toContain("Hundreds of files have no record_date");
+    expect(instructions).toContain("prefer citing the newer document unless the question asks about history");
     expect(instructions).toContain("file-search query must include 2026");
     expect(instructions).toContain("also include October");
     expect(instructions).toContain("not a parking provider");
@@ -83,7 +90,7 @@ describe("municipal clock and instructions", () => {
     });
     expect(instructions).toContain("this rule overrides rule 1");
     expect(instructions).toContain("records retrieved for this answer are only a sample");
-    expect(instructions).toContain("about 16 snippets");
+    expect(instructions).toContain(`about ${FILE_SEARCH_MAX_RESULTS} snippets`);
     expect(instructions).toContain("cannot give a complete list");
     expect(instructions).toContain("every time");
     expect(instructions).toContain("all votes where");
@@ -110,9 +117,13 @@ describe("municipal clock and instructions", () => {
   it("gives reasoning models a higher default output budget", () => {
     expect(getMaxOutputTokens("gpt-4.1-mini")).toBe(800);
     expect(getMaxOutputTokens("gpt-5.4-mini")).toBe(1600);
+    expect(getMaxOutputTokens("gpt-5.4-mini", "none")).toBe(1600);
+    expect(getMaxOutputTokens("gpt-5.4-mini", "low")).toBe(1600);
+    expect(getMaxOutputTokens("gpt-5.4-mini", "medium")).toBe(4000);
+    expect(getMaxOutputTokens("gpt-5.4-mini", "high")).toBe(4000);
     vi.stubEnv("OPENAI_MAX_OUTPUT_TOKENS", "500");
-    expect(getMaxOutputTokens("gpt-5.4-mini")).toBe(500);
+    expect(getMaxOutputTokens("gpt-5.4-mini", "medium")).toBe(500);
     vi.stubEnv("OPENAI_MAX_OUTPUT_TOKENS", "9000");
-    expect(getMaxOutputTokens("gpt-4.1-mini")).toBe(2000);
+    expect(getMaxOutputTokens("gpt-4.1-mini")).toBe(8000);
   });
 });

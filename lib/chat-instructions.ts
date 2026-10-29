@@ -1,3 +1,5 @@
+import { modelSupportsReasoning, type ReasoningEffort } from "@/lib/chat-model";
+import { FILE_SEARCH_MAX_RESULTS } from "@/lib/file-search";
 import { officialPages } from "@/lib/source-links";
 import { turnLanguageDirective } from "@/lib/ui-locale";
 
@@ -7,14 +9,16 @@ const TIME_ZONES: Record<string, string> = {
 };
 
 const OUTPUT_TOKEN_MIN = 100;
-const OUTPUT_TOKEN_MAX = 2_000;
+const OUTPUT_TOKEN_MAX = 8_000;
 const DEFAULT_OUTPUT_TOKENS = 800;
 /**
- * gpt-5 models count reasoning tokens against max_output_tokens. Oak Park uses
- * gpt-5.4-mini, so the fallback is higher than the gpt-4.1-mini default. An
- * explicit OPENAI_MAX_OUTPUT_TOKENS value is still honored.
+ * gpt-5 models count reasoning tokens against max_output_tokens. Effort `none`
+ * or `low` keeps the smaller budget. Medium and higher need room for the
+ * reasoning tokens and the visible answer. An explicit OPENAI_MAX_OUTPUT_TOKENS
+ * value is still honored, up to the cap.
  */
 const REASONING_MODEL_OUTPUT_TOKENS = 1_600;
+const DEEP_REASONING_OUTPUT_TOKENS = 4_000;
 
 export function timeZoneForSlug(slug: string) {
   return TIME_ZONES[slug] ?? "America/Chicago";
@@ -37,9 +41,16 @@ export function municipalClock(timeZone: string, now = new Date()) {
   return { iso, label, timeZone };
 }
 
-export function getMaxOutputTokens(model: string): number {
+export function getMaxOutputTokens(model: string, reasoningEffort?: ReasoningEffort): number {
   const configured = Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS ?? "", 10);
-  const fallback = model.startsWith("gpt-5") ? REASONING_MODEL_OUTPUT_TOKENS : DEFAULT_OUTPUT_TOKENS;
+  const deep =
+    modelSupportsReasoning(model) &&
+    (reasoningEffort === "medium" || reasoningEffort === "high" || reasoningEffort === "xhigh");
+  const fallback = modelSupportsReasoning(model)
+    ? deep
+      ? DEEP_REASONING_OUTPUT_TOKENS
+      : REASONING_MODEL_OUTPUT_TOKENS
+    : DEFAULT_OUTPUT_TOKENS;
   const value = Number.isFinite(configured) ? configured : fallback;
   return Math.min(OUTPUT_TOKEN_MAX, Math.max(OUTPUT_TOKEN_MIN, value));
 }
@@ -82,6 +93,10 @@ ${language} Earlier turns do not change this. If the latest question is English,
 
 Today is ${today.label} in ${today.timeZone} (${today.iso}). Any date on or before ${today.iso} is in the past. Never describe a past date as the next, upcoming, or future meeting, deadline, or event. When the question asks for the next or upcoming meeting and the records do not include a future meeting, the first sentence must say that. Then give the latest meeting you found, say that it has passed, and give the meetings page for the upcoming schedule. Do not present that past meeting as the next meeting. For example, a meeting on October 13, 2026 is not the next meeting on a later day.
 
+Work through each part of a multi-part question before you answer. Cross-check record_date, the filename, and the heading, and say when sources conflict.
+
+Retrieved files may include a title and a record_date. record_date is an 8-digit number YYYYMMDD, so 20261013 is October 13, 2026. Hundreds of files have no record_date. Keep those files and take the date from the filename or heading. Do not treat a missing record_date as older or newer than a dated file. Among records of the same kind, prefer citing the newer document unless the question asks about history, an earlier year, or how something changed. When a developer message lists title and record_date for a filename, use that list.
+
 ${sourceScope}
 
 ${pageBlock}
@@ -99,7 +114,7 @@ Rules:
 10. Do not provide legal advice or claim that the answer is an official municipal determination.
 11. Stay on this municipality's government, services, public records, and local news. If the question is about weather, sports, entertainment, or another city, politely decline in one or two sentences and invite a question about ${input.municipalityName}. Do not answer the off-topic question. Do not mention tools, functions, or runs. You do not have a weather tool. Never say that a tool was unavailable.
 12. Keep the answer clear, concise, and in complete sentences. End every paragraph with a period. Do not type a separate Sources section; the application displays citations from the API response. Obey the language of the latest user question stated at the top of these instructions. Do not continue in the language of an earlier turn.
-13. When the question asks for an exhaustive count or list across many meetings or records, such as every time, all votes where, how many times, or a matrix of votes, this rule overrides rule 1. The first sentence must say that the records retrieved for this answer are only a sample. File search returns about 16 snippets per turn, not the full set of minutes, so you cannot give a complete list or a complete count. Then give only examples you can verify from the records retrieved for this turn that strictly meet the user's stated criteria. If none of them meet those criteria, say that none were found in the retrieved records. Do not present the sample as every match.
+13. When the question asks for an exhaustive count or list across many meetings or records, such as every time, all votes where, how many times, or a matrix of votes, this rule overrides rule 1. The first sentence must say that the records retrieved for this answer are only a sample. File search returns about ${FILE_SEARCH_MAX_RESULTS} snippets per turn, not the full set of minutes, so you cannot give a complete list or a complete count. Then give only examples you can verify from the records retrieved for this turn that strictly meet the user's stated criteria. If none of them meet those criteria, say that none were found in the retrieved records. Do not present the sample as every match.
 14. Never offer an action you cannot take. You cannot keep searching, run a broader or later search, build a fuller matrix or table in a later turn, or email anyone. Do not say that you will do those things.
 15. When you report a roll call, the tally must match the names you give. Count the ayes, nays, abstentions, and absences before you state the split. A 6-1 vote has one person on the minority side, so it cannot have two named nays. The same check applies to every other tally: the number of names on each side must equal the numbers in the split. A unanimous vote, including a 7-0 or 6-0 vote, is not a case where only two members voted one way and everyone else voted the other way. A 4-2 vote is not that case either. Call a vote a match only when it satisfies the user's exact condition. If they asked for two named members voting yes with every other member voting no, or those two voting no with every other member voting yes, do not include any other split.
 16. Do not repeat a vote, tally, count, or other factual claim from an earlier turn unless the records retrieved for this turn support it. If an earlier statement was wrong, say the correction plainly. Do not defend or reuse the earlier claim.

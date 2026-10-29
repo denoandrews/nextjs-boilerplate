@@ -1,7 +1,9 @@
 import OpenAI from "openai";
 import { clarifyLevyAnswer } from "@/lib/answer-quality";
 import { newspaperDomains, extractCitedAnswer } from "@/lib/news-search";
+import { resolveChatModel } from "@/lib/chat-model";
 import { buildChatInstructions, getMaxOutputTokens } from "@/lib/chat-instructions";
+import { fileSearchFilters, fileSearchTool, loadAttributeIndex } from "@/lib/file-search";
 import { turnLanguageDirective } from "@/lib/ui-locale";
 import { OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT_MS, requestTimedOut } from "@/lib/chat-request";
 import { reserveChatQuery } from "@/lib/chat-limits";
@@ -12,7 +14,8 @@ import { withStoredSourceUrls } from "@/lib/source-links";
 import { getMunicipalityConfig } from "@/lib/municipalities";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+// Next.js reads this literal. Keep it equal to CHAT_MAX_DURATION_SECONDS.
+export const maxDuration = 180;
 
 const MAX_MESSAGE_LENGTH = 2_000;
 const MAX_HISTORY_MESSAGES = 12;
@@ -62,17 +65,14 @@ function parseHistory(value: unknown): HistoryMessage[] {
     }));
 }
 
-function getModel(): string {
-  return process.env.OPENAI_MODEL?.trim() || "gpt-4.1-mini";
-}
-
-function buildInput(history: HistoryMessage[], userText: string) {
+function buildInput(history: HistoryMessage[], userText: string, attributeIndex?: string | null) {
   return [
     ...history.map((message) => ({
       role: message.role,
       content: message.content,
     })),
     { role: "developer" as const, content: turnLanguageDirective(userText) },
+    ...(attributeIndex ? [{ role: "developer" as const, content: attributeIndex }] : []),
     { role: "user" as const, content: userText },
   ];
 }
@@ -153,28 +153,35 @@ export async function POST(req: Request) {
       maxRetries: OPENAI_MAX_RETRIES,
     });
     const newsDomains = newspaperDomains(municipality.slug);
-    // Domain-filtered search requires a newer model than GPT-4.1 Mini.
-    const model = newsDomains.length ? "gpt-5.4-mini" : getModel();
+    // Domain-filtered newspaper search needs a model newer than GPT-4.1 Mini.
+    // gpt-5.4-mini stays the default there. A municipality with no reasoning-capable
+    // default is moved to that model so medium reasoning can be sent.
+    const { model, reasoning } = resolveChatModel({ newsEnabled: newsDomains.length > 0 });
+    const filters = fileSearchFilters(message, municipality.slug);
+    const attributeIndex = await loadAttributeIndex(client, {
+      slug: municipality.slug,
+      vectorStoreIds: municipality.vectorStoreIds,
+      question: message,
+      filters,
+      signal: req.signal,
+      requestId,
+    });
 
     const response = await client.responses.create(
       {
         model,
-        max_output_tokens: getMaxOutputTokens(model),
-        ...(newsDomains.length ? { reasoning: { effort: "none" as const } } : {}),
+        max_output_tokens: getMaxOutputTokens(model, reasoning?.effort),
+        ...(reasoning ? { reasoning } : {}),
         instructions: buildChatInstructions({
           municipalityName: municipality.name,
           slug: municipality.slug,
           newsEnabled: newsDomains.length > 0,
           question: message,
         }),
-        input: buildInput(history, message),
+        input: buildInput(history, message, attributeIndex),
         include: ["file_search_call.results"],
         tools: [
-          {
-            type: "file_search",
-            vector_store_ids: municipality.vectorStoreIds,
-            max_num_results: 16,
-          },
+          fileSearchTool(municipality.vectorStoreIds, filters),
           ...(newsDomains.length ? [{
             type: "web_search" as const,
             filters: { allowed_domains: newsDomains },

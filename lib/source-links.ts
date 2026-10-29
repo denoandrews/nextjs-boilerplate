@@ -18,11 +18,13 @@
  * - `source_url` (https URL of the official file or page)
  * - `document_type` (`ordinance`, `resolution`, `minutes`, `agenda`, `policy`,
  *   `guideline`, `draft`, or `study`)
- * - `record_date` (`YYYY-MM-DD` adoption, revision, or meeting date)
+ * - `record_date` (8-digit YYYYMMDD number, such as 20261013; some files omit it)
  * - `status` (`adopted`, `draft`, `proposed`, or `superseded`)
  * Also set `documents.external_url` for rows that already have `openai_file_id`.
- * Do not add a file-search metadata filter until those attributes exist, or
- * every current file would drop out of search.
+ * Oak Park chat may filter on document_type when the question names minutes,
+ * an agenda, or a budget. It does not filter on record_date, because files
+ * without that attribute would drop out of search. Other municipalities stay
+ * unfiltered until their files have document_type on every record.
  */
 
 export type OfficialPage = {
