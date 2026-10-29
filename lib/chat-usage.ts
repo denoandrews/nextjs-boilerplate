@@ -1,6 +1,7 @@
 import "server-only";
 
 import OpenAI from "openai";
+import { modelSupportsReasoning } from "@/lib/chat-model";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isSupabaseAdminConfigured } from "@/lib/supabase/config";
 
@@ -31,11 +32,12 @@ export function estimateCostMicrousd(input: Omit<ChatUsage, "estimatedCostMicrou
 
   // Rates are USD per million tokens and USD per thousand tool calls. In
   // microdollars, the token calculation simplifies to tokens * rate.
-  const newsModel = model === "gpt-5.4-mini";
+  // gpt-5.4-mini rates. Other reasoning models use the same card until a model-specific rate is set.
+  const reasoningModel = Boolean(model && modelSupportsReasoning(model));
   const tokenCost =
-    uncachedTokens * envRate("OPENAI_INPUT_COST_PER_MILLION", newsModel ? 0.75 : 0.4) +
-    cachedTokens * envRate("OPENAI_CACHED_INPUT_COST_PER_MILLION", newsModel ? 0.075 : 0.1) +
-    input.outputTokens * envRate("OPENAI_OUTPUT_COST_PER_MILLION", newsModel ? 4.5 : 1.6);
+    uncachedTokens * envRate("OPENAI_INPUT_COST_PER_MILLION", reasoningModel ? 0.75 : 0.4) +
+    cachedTokens * envRate("OPENAI_CACHED_INPUT_COST_PER_MILLION", reasoningModel ? 0.075 : 0.1) +
+    input.outputTokens * envRate("OPENAI_OUTPUT_COST_PER_MILLION", reasoningModel ? 4.5 : 1.6);
   const fileSearchCost =
     input.fileSearchCalls * envRate("OPENAI_FILE_SEARCH_COST_PER_THOUSAND", 2.5) * 1_000;
 

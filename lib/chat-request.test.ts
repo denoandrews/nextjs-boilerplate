@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { CHAT_CLIENT_TIMEOUT_MS, OPENAI_REQUEST_TIMEOUT_MS, requestTimedOut } from "./chat-request";
+import { CHAT_CLIENT_TIMEOUT_MS, CHAT_MAX_DURATION_SECONDS, OPENAI_REQUEST_TIMEOUT_MS, requestTimedOut } from "./chat-request";
 
 describe("chat request timeout", () => {
-  it("keeps the browser timeout just behind the server timeout", () => {
+  it("keeps the browser timeout between the OpenAI timeout and the platform limit", () => {
+    expect(CHAT_MAX_DURATION_SECONDS).toBeLessThanOrEqual(300);
+    expect(OPENAI_REQUEST_TIMEOUT_MS).toBeLessThan(CHAT_MAX_DURATION_SECONDS * 1000);
     expect(CHAT_CLIENT_TIMEOUT_MS).toBeGreaterThan(OPENAI_REQUEST_TIMEOUT_MS);
-    expect(OPENAI_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(55_000);
+    expect(CHAT_CLIENT_TIMEOUT_MS).toBeLessThan(CHAT_MAX_DURATION_SECONDS * 1000);
   });
 
   it("recognizes provider and abort timeouts", () => {

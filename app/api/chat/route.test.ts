@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { POST } from "./route";
+import { CHAT_CLIENT_TIMEOUT_MS, CHAT_MAX_DURATION_SECONDS, OPENAI_REQUEST_TIMEOUT_MS } from "@/lib/chat-request";
+
+import { POST, maxDuration } from "./route";
 
 function chatRequest(body: unknown) {
   return new Request("http://localhost/api/chat", {
@@ -15,6 +17,15 @@ afterEach(() => {
 });
 
 describe("POST /api/chat", () => {
+  it("keeps medium reasoning inside the Vercel function budget", () => {
+    expect(maxDuration).toBe(180);
+    expect(maxDuration).toBe(CHAT_MAX_DURATION_SECONDS);
+    expect(maxDuration).toBeLessThanOrEqual(300);
+    expect(OPENAI_REQUEST_TIMEOUT_MS).toBeLessThan(maxDuration * 1000);
+    expect(CHAT_CLIENT_TIMEOUT_MS).toBeGreaterThan(OPENAI_REQUEST_TIMEOUT_MS);
+    expect(CHAT_CLIENT_TIMEOUT_MS).toBeLessThan(maxDuration * 1000);
+  });
+
   it("rejects an empty question", async () => {
     const response = await POST(chatRequest({ message: "   " }));
     const body = await response.json();
