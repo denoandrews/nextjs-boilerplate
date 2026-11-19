@@ -3,7 +3,9 @@
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CHAT_CLIENT_TIMEOUT_MS } from "@/lib/chat-request";
 import { chatStorageKey, parseChatSnapshot, serializeChatSnapshot, type StoredMessage } from "@/lib/chat-session";
-import { answerSegments, approvedNewspaperUrl, externalLinkProps, type ChatCitation } from "@/lib/news-search";
+import { answerSegments, externalLinkProps, type ChatCitation } from "@/lib/news-search";
+import { readChatEvents } from "@/lib/chat-stream";
+import { webCitationKind } from "@/lib/web-sources";
 import { citationSourceNote, safeHttpsUrl } from "@/lib/source-links";
 import { sourceLabels, turnLocale } from "@/lib/ui-locale";
 import type { ChatSnapshot } from "@/lib/chat-session";
@@ -14,6 +16,7 @@ type Message = StoredMessage & { role: Role; citations?: Citation[] };
 type ChatResponse = {
   answer?: string;
   newsSearched?: boolean;
+  officialSearched?: boolean;
   citations?: Citation[];
   error?: string;
   municipality?: string;
@@ -70,6 +73,7 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
   const [messages, setMessages] = useState<Message[]>([INITIAL_MESSAGE]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [statusText, setStatusText] = useState("Searching records and available sources…");
   const [municipality, setMunicipality] = useState("MuniGPT");
   const [ready, setReady] = useState(false);
   const conversationId = useRef<string | undefined>(undefined);
@@ -154,6 +158,7 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
     const userMessage: Message = { role: "user", text };
     const nextMessages = [...prior, userMessage];
     setBusy(true);
+    setStatusText("Searching records and available sources…");
     setInput("");
     setMessages(nextMessages);
 
@@ -175,9 +180,15 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
           municipalitySlug,
           conversationId: conversationId.current,
           anonymousSessionId: getAnonymousSessionId(),
+          streamProgress: true,
         }),
       });
-      const data = (await response.json().catch(() => ({}))) as ChatResponse;
+      const streamed = (response.headers.get("content-type") ?? "").includes("text/event-stream");
+      const data = (streamed && response.body
+        ? await readChatEvents(response.body, (status) => {
+          if (aliveRef.current) setStatusText(status);
+        })
+        : await response.json().catch(() => ({}))) as ChatResponse;
       if (data.conversationId) conversationId.current = data.conversationId;
       if (data.municipality) setMunicipality(data.municipality);
       const failed = !response.ok || !data.answer;
@@ -189,6 +200,7 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
             text: data.answer ?? data.error ?? "MuniGPT could not complete that request.",
             citations: data.citations,
             newsSearched: data.newsSearched,
+            officialSearched: data.officialSearched,
             ...(failed ? { retryQuestion: text } : {}),
           },
         ]);
@@ -249,7 +261,7 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
           </button>
         </div>
         <p className="chat-note">Informational only. Verify answers against the cited official records.</p>
-        {municipalitySlug === "oak-park-il" ? <p className="chat-news">News search: Wednesday Journal and Chicago Tribune. Article availability may be limited by access restrictions.</p> : null}
+        {municipalitySlug === "oak-park-il" ? <p className="chat-news">Searches village records, the Village website, Wednesday Journal, and the Chicago Tribune.</p> : null}
       </header>
 
       <div className="messages" ref={messagesRef} aria-live="polite" aria-busy={busy}>
@@ -262,6 +274,7 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
               <p>{answerSegments(message.text, message.citations, municipalitySlug).map((part, partIndex) =>
                 part.href ? <a key={partIndex} href={part.href} {...externalLinkProps(part.href)}>{part.text}</a> : part.text
               )}</p>
+              {message.officialSearched ? <p className="status">Searched the official website. That content is separate from newspaper reporting.</p> : null}
               {message.newsSearched ? <p className="status">Searched the approved newspapers. News reporting is a secondary source.</p> : null}
               {message.citations?.length ? (
                 <div className="sources" aria-label={labels.sources}>
@@ -269,11 +282,12 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
                   <ul>
                     {message.citations.map((citation) => {
                       const href = citation.url ? safeHttpsUrl(citation.url) : null;
-                      const news = href ? approvedNewspaperUrl(href) : null;
+                      const kind = href ? webCitationKind(href) : null;
                       const meetings = citationSourceNote(href, municipalitySlug);
+                      const sourceLabel = kind === "newspaper" ? labels.news : kind === "official" ? labels.official : labels.document;
                       return (
                         <li key={citation.fileId}>
-                          <span>{news ? `${labels.news}: ` : `${labels.document}: `}</span>
+                          <span>{sourceLabel}: </span>
                           {href ? <a href={href} title={meetings ? labels.meetingsPageTitle : undefined} target="_blank" rel="noopener noreferrer">{citation.filename}</a> : citation.filename}
                           {meetings ? <span className="source-note"> ({labels.meetingsPage})</span> : null}
                         </li>
@@ -290,7 +304,7 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
             </article>
           );
         })}
-        {busy ? <p className="status">Searching records and available sources…</p> : null}
+        {busy ? <p className="status">{statusText}</p> : null}
       </div>
 
       <form className="composer" onSubmit={send}>

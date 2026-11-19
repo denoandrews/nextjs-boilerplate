@@ -5,6 +5,8 @@ import { resolveChatModel } from "@/lib/chat-model";
 import { buildChatInstructions, getMaxOutputTokens, getRetryOutputTokens } from "@/lib/chat-instructions";
 import { logChatDiagnostics } from "@/lib/chat-diagnostics";
 import { fileSearchFilters, fileSearchTool, loadAttributeIndex } from "@/lib/file-search";
+import { researchModeEnabled, runResearchTurn } from "@/lib/research";
+import { webPassEnabled, webSearchDomains } from "@/lib/web-sources";
 import { turnLanguageDirective } from "@/lib/ui-locale";
 import { OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT_MS, requestTimedOut } from "@/lib/chat-request";
 import { reserveChatQuery } from "@/lib/chat-limits";
@@ -34,6 +36,7 @@ type ChatRequest = {
   municipalitySlug?: unknown;
   conversationId?: unknown;
   anonymousSessionId?: unknown;
+  streamProgress?: unknown;
 };
 
 function jsonResponse(body: unknown, status: number, requestId: string) {
@@ -64,6 +67,38 @@ function parseHistory(value: unknown): HistoryMessage[] {
       role: item.role,
       content: item.content.trim().slice(0, MAX_MESSAGE_LENGTH),
     }));
+}
+
+function eventStream(requestId: string, work: (send: (event: Record<string, unknown>) => void) => Promise<void>) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      };
+      try {
+        await work(send);
+      } catch (error: unknown) {
+        console.error(`[${requestId}] Chat stream failed.`, error);
+        send({
+          type: "error",
+          error: requestTimedOut(error)
+            ? "That search took too long. Please try again."
+            : "MuniGPT could not complete that request. Please try again.",
+          requestId,
+        });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Request-ID": requestId,
+    },
+  });
 }
 
 function buildInput(history: HistoryMessage[], userText: string, attributeIndex?: string | null) {
@@ -154,10 +189,78 @@ export async function POST(req: Request) {
       maxRetries: OPENAI_MAX_RETRIES,
     });
     const newsDomains = newspaperDomains(municipality.slug);
-    // Domain-filtered newspaper search needs a model newer than GPT-4.1 Mini.
+    // The forced website pass can be turned off. The quick path then keeps newspapers only.
+    const searchDomains = webPassEnabled(municipality.slug) ? webSearchDomains(municipality.slug) : newsDomains;
+    // Domain-filtered web search needs a model newer than GPT-4.1 Mini.
     // gpt-5.4-mini stays the default there. A municipality with no reasoning-capable
     // default is moved to that model so medium reasoning can be sent.
-    const { model, reasoning } = resolveChatModel({ newsEnabled: newsDomains.length > 0 });
+    const { model, reasoning } = resolveChatModel({ newsEnabled: newsDomains.length > 0 || searchDomains.length > 0 });
+    const historyText = history.map((item) => item.content).join("\n");
+    const conversationId =
+      typeof body.conversationId === "string" ? body.conversationId.slice(0, 80) : undefined;
+
+    const publish = async (result: {
+      answer: string;
+      citations: { fileId: string; filename: string; url?: string; marker?: string }[];
+      newsSearched: boolean;
+      officialSearched: boolean;
+      usage: ReturnType<typeof extractChatUsage>;
+    }) => {
+      const storedUrls = await documentSourceUrls(
+        municipality.id,
+        result.citations.map((citation) => citation.fileId),
+      );
+      const citations = withStoredSourceUrls(result.citations, storedUrls);
+      await logUsageEvent({
+        municipalityId: municipality.id,
+        requestId,
+        model,
+        ...result.usage,
+      });
+      const finalAnswer = clarifyLevyAnswer(message, result.answer, historyText) || "I could not establish an answer from the available records.";
+      const logged = await logChatExchange({
+        municipalityId: municipality.id,
+        conversationId,
+        anonymousSessionId,
+        question: message,
+        answer: finalAnswer,
+        citations,
+        requestId,
+        model,
+      });
+      return {
+        answer: finalAnswer,
+        citations,
+        newsSearched: result.newsSearched,
+        officialSearched: result.officialSearched,
+        municipality: municipality.name,
+        conversationId: logged.conversationId,
+        requestId,
+      };
+    };
+
+    if (researchModeEnabled(municipality.slug)) {
+      const run = (onProgress?: (status: string) => void) => runResearchTurn({
+        client,
+        slug: municipality.slug,
+        municipalityName: municipality.name,
+        vectorStoreIds: municipality.vectorStoreIds,
+        question: message,
+        history,
+        model,
+        reasoning,
+        signal: req.signal,
+        requestId,
+        onProgress,
+      });
+      if (body.streamProgress === true) {
+        return eventStream(requestId, async (send) => {
+          const researched = await run((status) => send({ type: "progress", message: status }));
+          send({ type: "result", ...(await publish(researched)) });
+        });
+      }
+      return jsonResponse(await publish(await run()), 200, requestId);
+    }
     const filters = fileSearchFilters(message, municipality.slug);
     const attributeIndex = await loadAttributeIndex(client, {
       slug: municipality.slug,
@@ -182,9 +285,9 @@ export async function POST(req: Request) {
       include: ["file_search_call.results" as const],
       tools: [
         fileSearchTool(municipality.vectorStoreIds, filters),
-        ...(newsDomains.length ? [{
+        ...(searchDomains.length ? [{
           type: "web_search" as const,
-          filters: { allowed_domains: newsDomains },
+          filters: { allowed_domains: searchDomains },
           external_web_access: true,
           search_context_size: "low" as const,
         }] : []),
@@ -193,7 +296,7 @@ export async function POST(req: Request) {
 
     const response = await client.responses.create(requestBody, { signal: req.signal });
     const firstDiagnostics = logChatDiagnostics(requestId, response);
-    let extracted = extractCitedAnswer(response, newsDomains.length > 0, { slug: municipality.slug });
+    let extracted = extractCitedAnswer(response, searchDomains.length > 0 || newsDomains.length > 0, { slug: municipality.slug });
     let usage = extractChatUsage(response, model);
 
     // A reasoning model can spend the whole output budget before it writes any
@@ -212,7 +315,7 @@ export async function POST(req: Request) {
           { signal: req.signal },
         );
         const retryDiagnostics = logChatDiagnostics(requestId, retry);
-        const retryExtracted = extractCitedAnswer(retry, newsDomains.length > 0, { slug: municipality.slug });
+        const retryExtracted = extractCitedAnswer(retry, searchDomains.length > 0 || newsDomains.length > 0, { slug: municipality.slug });
         usage = addChatUsage(usage, extractChatUsage(retry, model), model);
         if (retryExtracted.answer.trim()) {
           extracted = retryExtracted;
@@ -227,47 +330,13 @@ export async function POST(req: Request) {
       }
     }
 
-    const storedUrls = await documentSourceUrls(
-      municipality.id,
-      extracted.citations.map((citation) => citation.fileId)
-    );
-    const citations = withStoredSourceUrls(extracted.citations, storedUrls);
-    const { answer, newsSearched } = extracted;
-
-    await logUsageEvent({
-      municipalityId: municipality.id,
-      requestId,
-      model,
-      ...usage,
-    });
-
-    const historyText = history.map((item) => item.content).join("\n");
-    const finalAnswer = clarifyLevyAnswer(message, answer, historyText) || "I could not establish an answer from the available records.";
-    const conversationId =
-      typeof body.conversationId === "string" ? body.conversationId.slice(0, 80) : undefined;
-    const logged = await logChatExchange({
-      municipalityId: municipality.id,
-      conversationId,
-      anonymousSessionId,
-      question: message,
-      answer: finalAnswer,
-      citations,
-      requestId,
-      model,
-    });
-
-    return jsonResponse(
-      {
-        answer: finalAnswer,
-        citations,
-        newsSearched,
-        municipality: municipality.name,
-        conversationId: logged.conversationId,
-        requestId,
-      },
-      200,
-      requestId
-    );
+    return jsonResponse(await publish({
+      answer: extracted.answer,
+      citations: extracted.citations,
+      newsSearched: extracted.newsSearched,
+      officialSearched: extracted.citations.some((citation) => citation.marker?.startsWith("[Official")),
+      usage,
+    }), 200, requestId);
   } catch (error: unknown) {
     console.error(`[${requestId}] Chat request failed.`, error);
     const timedOut = requestTimedOut(error);

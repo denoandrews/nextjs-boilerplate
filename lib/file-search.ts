@@ -164,7 +164,7 @@ export function fileSearchTool(vectorStoreIds: string[], filters?: ComparisonFil
   };
 }
 
-function recordDateNumber(value: string | number | boolean | undefined): number | undefined {
+export function recordDateNumber(value: string | number | boolean | undefined): number | undefined {
   if (typeof value === "number" && Number.isInteger(value) && value >= 19_000_101 && value <= 21_001_231) return value;
   if (typeof value === "string" && /^\d{8}$/.test(value)) {
     const parsed = Number(value);

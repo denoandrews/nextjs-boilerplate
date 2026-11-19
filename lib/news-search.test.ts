@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { answerSegments, approvedNewspaperUrl, cleanCitedText, closeTruncatedAnswer, externalLinkProps, extractCitedAnswer, newspaperDomains, restorePeriodsAtFileCitations, splitNewsReferences } from "./news-search";
+import { answerSegments, approvedNewspaperUrl, approvedOfficialUrl, cleanCitedText, closeTruncatedAnswer, externalLinkProps, extractCitedAnswer, newspaperDomains, restorePeriodsAtFileCitations, splitNewsReferences } from "./news-search";
 
 function response(text: string, annotations: unknown[]) {
   return { output: [{ type: "web_search_call" }, { type: "message", content: [{ type: "output_text", text, annotations }] }] } as never;
@@ -17,6 +17,20 @@ describe("Oak Park newspaper search", () => {
     }
     expect(approvedNewspaperUrl("https://www.oakpark.com/news/")).toBe("https://www.oakpark.com/news/");
     expect(approvedNewspaperUrl("https://www.chicagotribune.com/story/")).toBeTruthy();
+    expect(approvedNewspaperUrl("https://www.oak-park.us/Government")).toBeNull();
+    expect(approvedOfficialUrl("https://www.oak-park.us/Government/Leadership/Village-Board")).toBe("https://www.oak-park.us/Government/Leadership/Village-Board");
+    expect(approvedOfficialUrl("https://oak-park.legistar.com/LegislationDetail.aspx")).toBe("https://oak-park.legistar.com/LegislationDetail.aspx");
+    expect(approvedOfficialUrl("https://oak-park.us.evil.test/a")).toBeNull();
+  });
+  it("links an official website citation separately from newspaper reporting", () => {
+    const result = extractCitedAnswer(response("Board SITE and paper CITE", [
+      { type: "url_citation", url: "https://www.oak-park.us/Government/Leadership/Village-Board", title: "Village Board", start_index: 6, end_index: 10 },
+      { type: "url_citation", url: "https://www.oakpark.com/story", title: "Article", start_index: 20, end_index: 24 },
+    ]), true);
+    expect(result.answer).toContain("[Official 1]");
+    expect(result.answer).toContain("[News 1]");
+    expect(result.citations.map((citation) => citation.marker)).toEqual(["[Official 1]", "[News 1]"]);
+    expect(splitNewsReferences(result.answer, result.citations).filter((part) => part.citation)).toHaveLength(2);
   });
   it("deduplicates news citations, preserves files, and builds linked inline references", () => {
     const annotation = { type: "url_citation", url: "https://www.oakpark.com/a/", title: "An article", start_index: 6, end_index: 11 };

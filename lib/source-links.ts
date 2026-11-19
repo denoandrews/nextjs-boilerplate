@@ -138,7 +138,7 @@ const OAK_PARK_FILENAME_LINKS: FilenameLink[] = [
   },
 ];
 
-const OAK_PARK_HOSTS = ["oak-park.us", "lrsrecycles.com", "codelibrary.amlegal.com"];
+const OAK_PARK_HOSTS = ["oak-park.us", "oak-park.legistar.com", "lrsrecycles.com", "codelibrary.amlegal.com"];
 
 const OAK_PARK_MENTIONS: { source: string; url: string }[] = [
   { source: "garbage collection page", url: "https://www.oak-park.us/Services-Parking/Waste-Recycling/Garbage-Collection" },

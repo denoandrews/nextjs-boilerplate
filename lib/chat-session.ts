@@ -10,6 +10,7 @@ export type StoredMessage = {
   text: string;
   citations?: StoredCitation[];
   newsSearched?: boolean;
+  officialSearched?: boolean;
   retryQuestion?: string;
 };
 
@@ -49,6 +50,7 @@ function sanitizeMessage(value: unknown): StoredMessage | null {
     text: candidate.text.slice(0, 20_000),
     ...(citations?.length ? { citations } : {}),
     ...(candidate.newsSearched === true ? { newsSearched: true } : {}),
+    ...(candidate.officialSearched === true ? { officialSearched: true } : {}),
     ...(typeof candidate.retryQuestion === "string" ? { retryQuestion: candidate.retryQuestion.slice(0, 2_000) } : {}),
   };
 }

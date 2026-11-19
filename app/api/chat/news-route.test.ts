@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FILE_SEARCH_MAX_RESULTS, FILE_SEARCH_RANKING_OPTIONS } from "@/lib/file-search";
 
@@ -29,6 +29,9 @@ vi.mock("@/lib/chat-usage", () => ({
 }));
 import { POST } from "./route";
 
+beforeEach(() => {
+  vi.stubEnv("MUNIGPT_RESEARCH_MODE", "0");
+});
 afterEach(() => { vi.clearAllMocks(); vi.unstubAllEnvs(); });
 describe("newspaper search request flow", () => {
   it("adds filtered live search and returns an inline linked source for Oak Park", async () => {
@@ -61,7 +64,11 @@ describe("newspaper search request flow", () => {
       ranking_options: FILE_SEARCH_RANKING_OPTIONS,
     });
     expect(body.citations[0].url).toBe("https://www.oakpark.com/story");
-    expect(mocks.create.mock.calls[0][0].tools).toContainEqual(expect.objectContaining({ type: "web_search", external_web_access: true, filters: { allowed_domains: ["oakpark.com", "chicagotribune.com"] } }));
+    expect(mocks.create.mock.calls[0][0].tools).toContainEqual(expect.objectContaining({
+      type: "web_search",
+      external_web_access: true,
+      filters: { allowed_domains: ["oakpark.com", "chicagotribune.com", "oak-park.us", "www.oak-park.us", "oak-park.legistar.com"] },
+    }));
     expect(mocks.log.mock.calls[0][0].citations).toEqual(body.citations);
   });
   it("tells the model the latest question is Spanish", async () => {
