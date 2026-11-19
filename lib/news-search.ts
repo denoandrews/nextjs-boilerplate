@@ -139,6 +139,15 @@ function clippedNote(answer: string) {
     : "The rest of this answer was cut off. Ask a follow-up if you need more.";
 }
 
+const DANGLING_HEADING = /(?:\n|^)\s*(?:#{1,3}\s*)?(?:What I couldn't find|Lo que no pude encontrar)\s*:?\s*$/i;
+
+/** Drop a heading that has no following text, then close an answer the model did not finish. */
+export function presentAnswer(answer: string, incomplete: boolean): string {
+  const stripped = answer.trim().replace(DANGLING_HEADING, "").trim();
+  if (!incomplete) return stripped;
+  return closeTruncatedAnswer(stripped, true);
+}
+
 export function closeTruncatedAnswer(answer: string, incomplete: boolean): string {
   const trimmed = answer.trim();
   if (!incomplete || !trimmed) return trimmed;
@@ -232,7 +241,7 @@ export function extractCitedAnswer(
   }
   const incomplete = response.status === "incomplete" && response.incomplete_details?.reason === "max_output_tokens";
   return {
-    answer: closeTruncatedAnswer(paragraphs.join("\n\n").trim(), incomplete),
+    answer: presentAnswer(paragraphs.join("\n\n").trim(), incomplete),
     citations: [...citations.values()],
     newsSearched: allowNews && response.output.some((item) => item.type === "web_search_call"),
   };

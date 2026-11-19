@@ -125,8 +125,8 @@ export function missingPartQueries(question: string, evidenceText: string): stri
   const checks: { when: RegExp; covered: RegExp; queries: string[] }[] = [
     {
       when: /\bcontractor\b/i,
-      covered: /\b(?:contractor|awarded to|construction contract|contract award)\b/i,
-      queries: [`${topic} construction contractor contract award`, `${topic} bid award construction contract`],
+      covered: /\bawarded to\s+[A-Z]|\b(?:Co\.|Inc\.|LLC|Corp\.)\b/,
+      queries: [`${topic} construction contract awarded`, `${topic} construction bid award contractor`],
     },
     {
       when: /\b(?:how much|what did it cost|contract amount)\b/i,
@@ -139,14 +139,16 @@ export function missingPartQueries(question: string, evidenceText: string): stri
       queries: [`${topic} change order`],
     },
   ];
-  if (/\bovernight parking\b/i.test(text) && /\b(?:current|policy)\b/i.test(text) && !/\b(?:2023|2024|ORD\s*23-118|MOT\s*24-142|ORD\s*24-124)\b/i.test(evidenceText)) {
+  const parkingCovered = /\b(?:ordinance|motion|ORD|MOT)\b[\s\S]{0,60}\b20(?:23|24)\b|\b20(?:23|24)\b[\s\S]{0,60}\b(?:ordinance|motion|expansion)\b/i;
+  if (/\bovernight parking\b/i.test(text) && /\b(?:current|policy)\b/i.test(text) && !parkingCovered.test(evidenceText)) {
     checks.push({
       when: /./,
       covered: /$a/,
       queries: [
-        "overnight parking ORD 23-118",
-        "overnight parking MOT 24-142",
-        "overnight parking ORD 24-124",
+        "overnight parking ordinance adopted 2023",
+        "overnight parking ordinance adopted 2024",
+        "overnight parking permit expansion board minutes",
+        "Legistar overnight parking legislation",
       ],
     });
   }
@@ -155,7 +157,14 @@ export function missingPartQueries(question: string, evidenceText: string): stri
     if (!check.when.test(text) || check.covered.test(evidenceText)) continue;
     queries.push(...check.queries);
   }
-  return uniqueQueries(queries, 8);
+  return uniqueQueries([...queries, ...discoveredSearchTerms(topic, evidenceText)], 8);
+}
+
+/** Ordinance numbers and company names already in the evidence, searched again instead of guessed. */
+export function discoveredSearchTerms(topic: string, evidenceText: string): string[] {
+  const ids = [...evidenceText.matchAll(/\b(?:ORD|MOT|RES)\s*\d{2}-\d{2,4}\b/gi)].map((match) => match[0].replace(/\s+/g, " "));
+  const companies = [...evidenceText.matchAll(/\b([A-Z][A-Za-z&'.-]+(?:\s+[A-Z][A-Za-z&'.-]+){0,3}\s(?:Co\.|Inc\.|LLC|Corp\.|Company))\b/g)].map((match) => match[1]);
+  return [...ids.map((id) => `${topic} ${id}`), ...companies.map((name) => `${topic} ${name}`)];
 }
 
 /** Targeted file-search queries. Person, year, and multi-part coverage is kept even if the planner is vague. */
@@ -185,10 +194,9 @@ export function draftResearchQueries(question: string, now = new Date()): string
     return uniqueQueries([
       "overnight parking permit ordinance 2023",
       "overnight parking permit ordinance 2024",
-      "overnight parking ORD 23-118",
-      "overnight parking MOT 24-142",
-      "overnight parking ORD 24-124",
-      "Legistar overnight parking ordinance",
+      "overnight parking permit expansion",
+      "overnight parking ordinance adopted minutes",
+      "Legistar overnight parking legislation",
     ]);
   }
 
@@ -308,7 +316,7 @@ export function formatEvidence(items: EvidenceItem[], question = ""): string {
     ? " For the current overnight parking policy, include 2023 and 2024 ordinance or Legistar changes that appear in the evidence, not only the current website summary."
     : "";
   return [
-    `Evidence for this question, already merged. Municipal records and official website pages are listed before newspaper reporting. Official website content is not newspaper reporting. Use only this evidence for facts. Cite the bracket number, such as [1], at the end of every factual sentence. If a person appears only as a candidate or an objector here, say the records may be incomplete and do not conclude they were not a village official.${roster}${parking}`,
+    `Evidence for this question, already merged. Municipal records and official website pages are listed before newspaper reporting. Official website content is not newspaper reporting. Use only this evidence for facts. Cite the bracket number, such as [1], at the end of every factual sentence, including each relevant newspaper passage alongside the official sources. If a person appears only as a candidate or an objector here, say the records may be incomplete and do not conclude they were not a village official.${roster}${parking}`,
     ...lines,
   ].join("\n\n");
 }
@@ -335,16 +343,43 @@ export function alignCitations(answer: string, items: EvidenceItem[]): { answer:
     const next = renumber.get(Number(raw));
     return next ? `[${next}]` : full;
   });
-  const citations = order.map((old, index) => {
-    const item = items[old - 1];
-    return {
-      fileId: item.id,
-      filename: item.filename,
-      ...(item.url ? { url: item.url } : {}),
-      marker: `[${index + 1}]`,
-    };
+  const citations = order.map((old, index) => citationForItem(items[old - 1], index + 1));
+  return citeRetrievedNews(rewritten, items, citations);
+}
+
+function citationUrl(item: EvidenceItem): string | undefined {
+  const candidate = item.url || (item.id.startsWith("https://") ? item.id : "");
+  return candidate ? matchWebUrl(candidate)?.url : undefined;
+}
+
+function citationForItem(item: EvidenceItem, number: number): ChatCitation {
+  const url = citationUrl(item);
+  return {
+    fileId: item.id,
+    filename: item.filename,
+    ...(url ? { url } : {}),
+    marker: `[${number}]`,
+  };
+}
+
+/** Relevant newspaper passages stay in the answer even when the model cites only official records. */
+export function citeRetrievedNews(
+  answer: string,
+  items: EvidenceItem[],
+  citations: ChatCitation[],
+): { answer: string; citations: ChatCitation[] } {
+  const cited = new Set(citations.map((citation) => citation.fileId));
+  const news = items.filter((item) => item.kind === "newspaper" && citationUrl(item) && !cited.has(item.id)).slice(0, 2);
+  if (news.length === 0) return { answer, citations };
+  const next = [...citations];
+  const lines = news.map((item) => {
+    const number = next.length + 1;
+    next.push(citationForItem(item, number));
+    const quote = item.text.split(/(?<=[.!?])\s/)[0]?.trim().slice(0, 280) || item.text.slice(0, 280);
+    const label = /tribune/i.test(item.url ?? item.filename) ? "The Chicago Tribune" : "The Wednesday Journal";
+    return `${label} reported: ${quote.replace(/\s+/g, " ")} [${number}]`;
   });
-  return { answer: rewritten, citations };
+  return { answer: `${answer.trim()}\n\n${lines.join("\n\n")}`, citations: next };
 }
 
 export function parsePlannerQueries(text: string): string[] {
@@ -455,7 +490,10 @@ function webItemsFromResponse(
     let host = "";
     try { host = new URL(url).hostname; } catch { host = url.slice(0, 40); }
     if (!hosts.includes(host)) hosts.push(host);
-    const body = `${title}\n${excerpt}`;
+    const path = (() => {
+      try { return decodeURIComponent(url).replace(/[-_/]+/g, " "); } catch { return url; }
+    })();
+    const body = `${title}\n${excerpt}\n${path}`;
     if (!matched || !webResultIsRelevant(question, body)) {
       dropped += 1;
       return;
@@ -543,8 +581,8 @@ async function runWebPass(
     const response = await client.responses.create(
       {
         model: process.env.MUNIGPT_PLANNER_MODEL?.trim() || DEFAULT_REASONING_MODEL,
-        reasoning: { effort: "low" },
-        max_output_tokens: 1_200,
+        reasoning: { effort: "none" },
+        max_output_tokens: 6_000,
         tool_choice: "required",
         instructions: input.kind === "official"
           ? "Search only the allowed official municipal site. Quote short passages that are about the question, with page titles and full https URLs. Skip unrelated pages. Do not write the final answer. Do not conclude that a person was not an official."
@@ -562,6 +600,9 @@ async function runWebPass(
     );
     logChatDiagnostics(input.requestId, response);
     const extracted = webItemsFromResponse(response, input.question, input.now, input.kind);
+    if (response.status === "incomplete" && extracted.items.length === 0) {
+      throw Object.assign(new Error("web search output was cut off"), { name: "TimeoutError" });
+    }
     console.info(`[${input.requestId}] web pass ${input.kind} kept=${extracted.items.length} dropped=${extracted.dropped} hosts=${extracted.hosts.join(",") || "none"} domains=${domains.join(",")}`);
     const usage = extractChatUsage(response, DEFAULT_REASONING_MODEL);
     if ((usage.webSearchCalls ?? 0) === 0) usage.webSearchCalls = 1;
@@ -593,14 +634,17 @@ async function planQueries(
   const response = await client.responses.create(
     {
       model: process.env.MUNIGPT_PLANNER_MODEL?.trim() || DEFAULT_REASONING_MODEL,
-      reasoning: { effort: "low" },
-      max_output_tokens: 500,
+      reasoning: { effort: "none" },
+      max_output_tokens: 4_000,
       instructions: 'Return JSON only: {"queries":["..."]}. Write 3 to 6 short file-search queries. One query per part of the question. For a span of years, one query per year. For a person, include the name with trustee, village board, roll call, budget, and president. Do not answer the question.',
       input: input.question,
     },
     { timeout: PLAN_TIMEOUT_MS, signal: input.signal },
   );
   logChatDiagnostics(input.requestId, response);
+  if (response.status === "incomplete") {
+    console.info(`[${input.requestId}] Planner output was incomplete (${response.incomplete_details?.reason ?? "unknown"}). Using any queries that were written.`);
+  }
   return { queries: parsePlannerQueries(outputText(response)), usage: extractChatUsage(response, DEFAULT_REASONING_MODEL) };
 }
 
@@ -657,7 +701,7 @@ export async function runResearchTurn(input: {
         now,
         domains: ["oak-park.legistar.com"],
         focus: /\bovernight parking\b/i.test(question)
-          ? "overnight parking ordinance ORD 23-118 MOT 24-142 ORD 24-124"
+          ? "overnight parking ordinance 2023 2024 permit expansion"
           : `${question} ordinance motion Legistar`,
       }) : Promise.resolve({ items: [], usage: null, ok: false }),
     ]);
@@ -729,6 +773,17 @@ export async function runResearchTurn(input: {
     })));
     followUpCalls = extra.length;
     evidence = mergeEvidence([...evidence, ...extra.flat()]);
+    if (webOn && remaining() > 25_000) {
+      const focus = gaps.slice(0, 3).join(". ");
+      const extraWeb = await Promise.all([
+        runNews ? runWebPass(input.client, { ...input, question, kind: "newspaper", now, focus }) : Promise.resolve({ items: [], usage: null, ok: false }),
+        (runLegistar || runOfficial) ? runWebPass(input.client, { ...input, question, kind: "official", now, domains: ["oak-park.legistar.com"], focus }) : Promise.resolve({ items: [], usage: null, ok: false }),
+      ]);
+      for (const pass of extraWeb) add(pass.usage);
+      if (extraWeb[0].ok) web.newsOk = true;
+      if (extraWeb[1].ok) web.officialOk = true;
+      evidence = mergeEvidence([...evidence, ...extraWeb.flatMap((pass) => pass.items)]);
+    }
   }
   usage = {
     ...usage,
@@ -763,8 +818,8 @@ export async function runResearchTurn(input: {
   logChatDiagnostics(input.requestId, response);
   add(extractChatUsage(response, input.model));
   let extracted = extractCitedAnswer(response, true, { slug: input.slug });
-  if (!extracted.answer.trim() && remaining() > 12_000) {
-    console.info(`[${input.requestId}] Research answer was empty. Retrying once at low effort.`);
+  if ((!extracted.answer.trim() || response.status === "incomplete") && remaining() > 12_000) {
+    console.info(`[${input.requestId}] Research answer was ${extracted.answer.trim() ? "incomplete" : "empty"}. Retrying once at low effort.`);
     const retry = await input.client.responses.create(
       {
         ...requestBody,
