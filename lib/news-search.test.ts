@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { answerSegments, approvedNewspaperUrl, approvedOfficialUrl, cleanCitedText, closeTruncatedAnswer, externalLinkProps, extractCitedAnswer, newspaperDomains, restorePeriodsAtFileCitations, splitNewsReferences } from "./news-search";
+import { answerSegments, approvedNewspaperUrl, approvedOfficialUrl, cleanCitedText, closeTruncatedAnswer, externalLinkProps, extractCitedAnswer, newspaperDomains, presentAnswer, restorePeriodsAtFileCitations, splitNewsReferences } from "./news-search";
+import { matchWebUrl, sanitizeUrlText } from "./web-sources";
 
 function response(text: string, annotations: unknown[]) {
   return { output: [{ type: "web_search_call" }, { type: "message", content: [{ type: "output_text", text, annotations }] }] } as never;
@@ -120,6 +121,11 @@ describe("Oak Park newspaper search", () => {
     } as never, false);
     expect(result.answer).toBe("Place carts out by 7 a.m.\n\nThe rest of this answer was cut off. Ask a follow-up if you need more.");
     expect(closeTruncatedAnswer("La ordenanza evita el escurrimiento", true)).toContain("se cortó");
+    expect(presentAnswer("Overnight parking ends at 6 a.m.\n\nWhat I couldn't find", false)).toBe("Overnight parking ends at 6 a.m.");
+    expect(presentAnswer("Overnight parking ends at 6 a.m.\n\nWhat I couldn't find", true)).toContain("cut off");
+    expect(sanitizeUrlText("https://www.oakpark.com/story%60")).toBe("https://www.oakpark.com/story");
+    expect(matchWebUrl("https://www.oak-park.us/budget`")?.url).toBe("https://www.oak-park.us/budget");
+    expect(matchWebUrl("https://www.oakpark.com/2024/budget%60")?.kind).toBe("newspaper");
   });
   it("linkifies an official page and leaves other towns' text alone", () => {
     const linked = answerSegments("Agendas: https://www.oak-park.us/Government/Meetings/Village-Board-Agendas-Minutes-Videos.", [], "oak-park-il");

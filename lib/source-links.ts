@@ -180,8 +180,15 @@ export function linkHosts(slug: string): string[] {
 }
 
 export function safeHttpsUrl(value: string): string | null {
+  const cleaned = value.trim().replace(/^[<\[('"]+/, "");
+  let text = cleaned;
+  let previous = "";
+  while (text !== previous) {
+    previous = text;
+    text = text.replace(/(?:%60)+$/i, "").replace(/[`"'.,;:!?)\]]+$/g, "");
+  }
   try {
-    const url = new URL(value);
+    const url = new URL(text);
     if (url.protocol !== "https:" || url.username || url.password) return null;
     return url.href;
   } catch {

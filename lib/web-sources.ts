@@ -72,11 +72,22 @@ export type MatchedWebUrl = {
   domain: string;
 };
 
+/** Drop a trailing backtick, encoded `%60`, or sentence punctuation the model glued onto a URL. */
+export function sanitizeUrlText(value: string): string {
+  let text = value.trim().replace(/^[<\[('"]+/, "");
+  let previous = "";
+  while (text !== previous) {
+    previous = text;
+    text = text.replace(/(?:%60)+$/i, "").replace(/[`"'.,;:!?)\]]+$/g, "");
+  }
+  return text;
+}
+
 /** Longest configured domain wins, so www.oak-park.us stays official rather than a shorter suffix. */
 export function matchWebUrl(value: string, sources: WebSource[] = Object.values(MUNICIPAL_WEB_SOURCES).flat()): MatchedWebUrl | null {
   let parsed: URL;
   try {
-    parsed = new URL(value);
+    parsed = new URL(sanitizeUrlText(value));
   } catch {
     return null;
   }

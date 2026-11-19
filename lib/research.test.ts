@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   alignCitations,
+  citeRetrievedNews,
   draftResearchQueries,
   mergeEvidence,
   missingPartQueries,
@@ -65,7 +66,7 @@ describe("research queries", () => {
       "What did the board decide about the Lake Street streetscape, who was the contractor?",
       "Thomas Engineering Group handled the design.",
     );
-    expect(gaps.some((query) => /construction contractor/i.test(query))).toBe(true);
+    expect(gaps.some((query) => /construction (?:contract|bid)/i.test(query))).toBe(true);
     expect(missingPartQueries(
       "who was the contractor?",
       "The construction contract was awarded to R.W. Duntemann Co.",
@@ -74,8 +75,10 @@ describe("research queries", () => {
       "What is the current overnight parking policy?",
       "Overnight parking is banned from 2:30 a.m. to 6:00 a.m. unless a permit is used.",
     );
-    expect(parkingGaps.join(" ")).toContain("ORD 23-118");
-    expect(parkingGaps.join(" ")).toContain("ORD 24-124");
+    expect(parkingGaps.join(" ")).toContain("2023");
+    expect(parkingGaps.join(" ")).toContain("2024");
+    expect(parkingGaps.join(" ")).toContain("ordinance");
+    expect(parkingGaps.join(" ")).not.toContain("ORD 23-118");
   });
 
   it("reads planner JSON and ignores anything that is not a query list", () => {
@@ -149,5 +152,11 @@ describe("web evidence", () => {
       "https://www.oak-park.us/board",
       "https://www.oakpark.com/story",
     ]);
+    const withNews = citeRetrievedNews("The budget grew. [1]", merged, [
+      { fileId: "file-minutes", filename: "minutes.pdf", marker: "[1]" },
+    ]);
+    expect(withNews.answer).toContain("Wednesday Journal reported");
+    expect(withNews.citations.some((citation) => citation.url === "https://www.oakpark.com/story")).toBe(true);
+    expect(withNews.answer).toContain(`[${withNews.citations.length}]`);
   });
 });
