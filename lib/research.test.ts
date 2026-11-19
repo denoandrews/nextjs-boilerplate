@@ -2,14 +2,22 @@ import { describe, expect, it } from "vitest";
 
 import {
   alignCitations,
+  contractorQueries,
+  dateWindowAround,
+  descriptionNearLegislativeId,
   draftResearchQueries,
   filterNewsEvidence,
   formatEvidence,
+  legislativeIdQueries,
+  legislativeIds,
+  legislativeQueryVariants,
+  legislativeResolutionQueries,
   mergeEvidence,
   missingPartQueries,
   newsEvidenceIsRelevant,
   parsePlannerQueries,
   personName,
+  RESEARCH_PLANNER_INSTRUCTIONS,
   recencyCutoff,
   researchModeEnabled,
   scoreEvidence,
@@ -56,6 +64,9 @@ describe("research queries", () => {
     const parking = draftResearchQueries("What is the current overnight parking policy?", NOW).join(" ");
     expect(parking).toContain("2023");
     expect(parking).toContain("2024");
+    expect(parking).toMatch(/motion/);
+    expect(parking).toMatch(/approved/);
+    expect(parking).toMatch(/adopted/);
     const lake = draftResearchQueries(
       "What did the board decide about the Lake Street streetscape, how much did it cost, who was the contractor, and were there any change orders?",
       NOW,
@@ -86,6 +97,92 @@ describe("research queries", () => {
   it("reads planner JSON and ignores anything that is not a query list", () => {
     expect(parsePlannerQueries('```json\n{"queries":["Lake Street cost"]}\n```')).toEqual(["Lake Street cost"]);
     expect(parsePlannerQueries("I will answer instead.")).toEqual([]);
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("motion");
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("approved");
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("adopted");
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("agenda");
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("contractor");
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("letting");
+  });
+
+  it("detects legislative IDs and searches the subject next to them", () => {
+    expect(legislativeIds("ORD 23-118 and Ord. 23-118 and RES 24-12 and MOT 24-142").map((id) => id.canonical)).toEqual([
+      "ORD 23-118",
+      "RES 24-12",
+      "MOT 24-142",
+    ]);
+    expect(legislativeIds("Ordinance 23-118")).toEqual([]);
+    expect(legislativeIdQueries({ kind: "ORD", number: "23-118", canonical: "ORD 23-118" })).toEqual([
+      "ORD 23-118",
+      "Ord. 23-118",
+      "Ordinance 23-118",
+    ]);
+    expect(legislativeIdQueries({ kind: "MOT", number: "24-142", canonical: "MOT 24-142" })).toContain("Motion 24-142");
+    const agenda = "F. ORD 23-118 Reduced Parking Permit Fee Program expansion to affordable-housing sites. Second Reading and Adoption";
+    expect(descriptionNearLegislativeId(agenda, { kind: "ORD", number: "23-118", canonical: "ORD 23-118" }))
+      .toContain("Reduced Parking Permit Fee Program");
+    expect(descriptionNearLegislativeId("The fee program expanded to affordable-housing sites.", { kind: "ORD", number: "23-118", canonical: "ORD 23-118" }))
+      .toBeNull();
+    const motion = "MOT 24-142 Zones Y1/Y2 overnight permit frontages";
+    expect(descriptionNearLegislativeId(motion, { kind: "MOT", number: "24-142", canonical: "MOT 24-142" })).toContain("Y1/Y2");
+    const window = dateWindowAround(20240411);
+    expect(window.start).toBeLessThanOrEqual(20240311);
+    expect(window.end).toBeGreaterThanOrEqual(20240411);
+
+    const indexHit = item({
+      id: "file-agenda",
+      kind: "record",
+      filename: "2023-12-04_VillageBoard_agenda.docx",
+      documentType: "agenda",
+      recordDate: 20231204,
+      text: agenda,
+      score: 0.8,
+    });
+    const body = item({
+      id: "file-ordinance",
+      kind: "record",
+      filename: "2023-12-04_VillageBoard__08_Ordinance.docx",
+      documentType: "ordinance",
+      recordDate: 20231204,
+      text: "Reduced Parking Permit Fee Program expansion to affordable-housing sites.",
+      score: 0.9,
+    });
+    const followUps = legislativeResolutionQueries([body, indexHit]);
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0]?.id).toBe("ORD 23-118");
+    expect(followUps[0]?.query).toContain("affordable-housing");
+    expect(followUps[0]?.recordDate).toBe(20231204);
+    expect(followUps[0]?.dateStart).toBeLessThanOrEqual(20231204);
+    expect(followUps[0]?.dateEnd).toBeGreaterThanOrEqual(20231204);
+    expect(legislativeQueryVariants("What ordinance changed overnight parking?").join(" ")).toMatch(/motion approved/);
+    expect(legislativeQueryVariants("What ordinance changed overnight parking?").join(" ")).toMatch(/adopted/);
+  });
+
+  it("asks for the construction award, not only the design consultant", () => {
+    const question = "Who was the contractor for the Lake Street streetscape?";
+    const queries = contractorQueries(question).join(" ");
+    expect(queries).toContain("Lake Street streetscape contract awarded");
+    expect(queries).toContain("construction contractor bid award");
+    expect(queries).toContain("awarded to");
+    expect(queries).toContain("budget explanation");
+    expect(queries).toContain("IDOT letting");
+    expect(contractorQueries("What is the village population?")).toEqual([]);
+    expect(draftResearchQueries(question, NOW).some((query) => /IDOT letting/i.test(query))).toBe(true);
+    const design = scoreEvidence({
+      id: "design",
+      kind: "record",
+      filename: "design-amendment.pdf",
+      text: "Thomas Engineering Group, the design consultant, amended the engineering contract.",
+      score: 0.95,
+    }, question, NOW);
+    const build = scoreEvidence({
+      id: "build",
+      kind: "record",
+      filename: "budget-explanation.pdf",
+      text: "IDOT awarded the construction contract to R.W. Duntemann Co. for $10,557,783.",
+      score: 0.6,
+    }, question, NOW);
+    expect(build.rankScore).toBeGreaterThan(design.rankScore);
   });
 });
 

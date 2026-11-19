@@ -1,10 +1,10 @@
 import type OpenAI from "openai";
-import type { ComparisonFilter } from "openai/resources/shared";
+import type { ComparisonFilter, CompoundFilter } from "openai/resources/shared";
 
 import { DEFAULT_REASONING_MODEL, type ReasoningEffort } from "@/lib/chat-model";
 import { buildChatInstructions, getMaxOutputTokens, getRetryOutputTokens } from "@/lib/chat-instructions";
 import { logChatDiagnostics } from "@/lib/chat-diagnostics";
-import { recordDateNumber, dateBoostFor, calendarStamp, questionAsksAboutHistory, shiftMonths } from "@/lib/file-search";
+import { asksAboutLegislation, recordDateNumber, dateBoostFor, calendarStamp, questionAsksAboutHistory, shiftMonths } from "@/lib/file-search";
 import { excludedCitationFilename, officialPages } from "@/lib/source-links";
 import { addChatUsage, estimateCostMicrousd, extractChatUsage, type ChatUsage } from "@/lib/chat-usage";
 import { extractCitedAnswer, omitInvalidCitationLines, type ChatCitation } from "@/lib/news-search";
@@ -18,7 +18,7 @@ import {
   type WebSourceKind,
 } from "@/lib/web-sources";
 
-export const RESEARCH_QUERY_LIMIT = 6;
+export const RESEARCH_QUERY_LIMIT = 12;
 export const RESEARCH_OFFICIAL_SLOTS = 30;
 export const RESEARCH_NEWSPAPER_SLOTS = 6;
 const SEARCH_RESULTS = 12;
@@ -119,15 +119,180 @@ function topicPhrase(question: string): string {
   return "the project";
 }
 
+const CONSTRUCTION_QUESTION =
+  /\b(?:contractors?|vendors?|awarded|who\s+(?:built|did|was\s+awarded)|construction\s+contract)\b/i;
+
+export function asksAboutConstruction(question: string): boolean {
+  return CONSTRUCTION_QUESTION.test(stripHarnessPrefix(question));
+}
+
+/** Named project when the question has one, otherwise the question with the filler words removed. */
+function projectPhrase(question: string): string {
+  const named = topicPhrase(question);
+  if (named !== "the project") return named;
+  const cleaned = stripHarnessPrefix(question)
+    .replace(/[?.,;:]+/g, " ")
+    .replace(/\b(?:what|whats|what's|who|when|where|why|how|did|does|do|is|are|was|were|the|a|an|board|decide|decided|about|please|tell|me|of|for|and|any|there|has|have|had|been|current|our|village)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (cleaned || "municipal action").slice(0, 140);
+}
+
+export type LegislativeKind = "ORD" | "RES" | "MOT";
+
+export type LegislativeId = {
+  kind: LegislativeKind;
+  /** Year-serial, such as 23-118. */
+  number: string;
+  /** Canonical form, such as ORD 23-118. */
+  canonical: string;
+};
+
+/** ORD 23-118, RES 24-12, MOT 24-142, and the dotted Ord. form. */
+export function legislativeIds(text: string): LegislativeId[] {
+  const found = new Map<string, LegislativeId>();
+  for (const match of text.matchAll(/\b(ORD|RES|MOT)\.?\s*(\d{2})\s*-\s*(\d{2,4})\b/gi)) {
+    const kind = match[1].toUpperCase() as LegislativeKind;
+    const number = `${match[2]}-${match[3]}`;
+    const canonical = `${kind} ${number}`;
+    if (!found.has(canonical)) found.set(canonical, { kind, number, canonical });
+  }
+  return [...found.values()];
+}
+
+export function legislativeIdQueries(id: LegislativeId): string[] {
+  const label = id.kind === "ORD" ? "Ordinance" : id.kind === "RES" ? "Resolution" : "Motion";
+  const dotted = id.kind === "ORD" ? "Ord." : id.kind === "RES" ? "Res." : "Mot.";
+  return [`${id.kind} ${id.number}`, `${dotted} ${id.number}`, `${label} ${id.number}`];
+}
+
+const READING_BOILERPLATE = /\b(?:first reading|second reading(?: and adoption)?|for adoption|consent agenda|agenda item)\b/gi;
+
+function legislativeIdPattern(id: LegislativeId): RegExp {
+  const label = id.kind === "ORD" ? "Ordinance" : id.kind === "RES" ? "Resolution" : "Motion";
+  return new RegExp(`\\b(?:${id.kind}|${label})\\.?\\s*${id.number.replace("-", "\\s*-\\s*")}\\b`, "i");
+}
+
+/** Subject line sitting next to a legislative ID on an agenda, in the minutes, or in code history. */
+export function descriptionNearLegislativeId(text: string, id: LegislativeId): string | null {
+  const pattern = legislativeIdPattern(id);
+  const match = pattern.exec(text);
+  if (!match || match.index === undefined) return null;
+  const start = Math.max(0, match.index - 120);
+  const end = Math.min(text.length, match.index + match[0].length + 220);
+  const cleaned = text
+    .slice(start, end)
+    .replace(pattern, " ")
+    .replace(READING_BOILERPLATE, " ")
+    .replace(/\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b/g, " ")
+    .replace(/[^A-Za-z0-9'’./&-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter((word) => word.length > 2 || /\d/.test(word))
+    .join(" ");
+  if (cleaned.length < 20) return null;
+  return cleaned.slice(0, 180);
+}
+
+function dateFromNearbyText(text: string): number | undefined {
+  const numeric = /\b(\d{1,2})[-/](\d{1,2})[-/]((?:19|20)\d{2})\b/.exec(text);
+  if (!numeric) return undefined;
+  const month = Number(numeric[1]);
+  const day = Number(numeric[2]);
+  const year = Number(numeric[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return undefined;
+  return year * 10_000 + month * 100 + day;
+}
+
+function shiftDays(stamp: number, days: number): number {
+  const year = Math.floor(stamp / 10_000);
+  const month = Math.floor((stamp % 10_000) / 100);
+  const day = stamp % 100;
+  const date = new Date(Date.UTC(year, month - 1, day + days));
+  return date.getUTCFullYear() * 10_000 + (date.getUTCMonth() + 1) * 100 + date.getUTCDate();
+}
+
+export function dateWindowAround(stamp: number, beforeDays = 60, afterDays = 45): { start: number; end: number } {
+  return { start: shiftDays(stamp, -beforeDays), end: shiftDays(stamp, afterDays) };
+}
+
+function isLegislativeIndexHit(item: EvidenceItem): boolean {
+  const type = (item.documentType ?? "").toLowerCase();
+  if (type === "ordinance" || type === "resolution") return false;
+  if (type === "agenda" || type === "minutes") return true;
+  const label = `${item.filename} ${item.title ?? ""}`;
+  if (/\b(?:agenda|minutes|packet)\b/i.test(label)) return true;
+  return /\b(?:amended by|village code|code history|second reading|first reading)\b/i.test(item.text);
+}
+
+export type LegislativeFollowUp = {
+  id: string;
+  query: string;
+  recordDate?: number;
+  dateStart?: number;
+  dateEnd?: number;
+};
+
+/**
+ * Once an agenda, minutes, or code-history passage names a legislative ID,
+ * search the subject next to that ID around the meeting date. The adopted
+ * document often never repeats the ID.
+ */
+export function legislativeResolutionQueries(items: EvidenceItem[]): LegislativeFollowUp[] {
+  const records = items.filter((item) => item.kind === "record" && isLegislativeIndexHit(item));
+  const out: LegislativeFollowUp[] = [];
+  const seen = new Set<string>();
+  for (const item of records) {
+    const source = `${item.title ?? ""}\n${item.filename}\n${item.text}`;
+    for (const id of legislativeIds(source)) {
+      if (seen.has(id.canonical)) continue;
+      const description = descriptionNearLegislativeId(source, id);
+      if (!description) continue;
+      seen.add(id.canonical);
+      const pattern = legislativeIdPattern(id);
+      const located = pattern.exec(source);
+      const recordDate = (located ? dateFromNearbyText(source.slice(Math.max(0, located.index - 80), located.index + 120)) : undefined) ?? item.recordDate;
+      const window = recordDate ? dateWindowAround(recordDate) : undefined;
+      out.push({
+        id: id.canonical,
+        query: description,
+        ...(recordDate ? { recordDate, dateStart: window?.start, dateEnd: window?.end } : {}),
+      });
+      if (out.length >= 3) return out;
+    }
+  }
+  return out;
+}
+
+export function legislativeQueryVariants(question: string): string[] {
+  if (!asksAboutLegislation(question)) return [];
+  const topic = projectPhrase(question);
+  return [`${topic} motion approved`, `${topic} adopted`, `${topic} resolution agenda minutes`];
+}
+
+export function contractorQueries(question: string): string[] {
+  if (!asksAboutConstruction(question)) return [];
+  const topic = projectPhrase(question);
+  return [
+    `${topic} contract awarded`,
+    `${topic} construction contract awarded`,
+    `${topic} construction contractor bid award`,
+    `${topic} awarded to`,
+    `${topic} budget explanation`,
+    `${topic} IDOT letting`,
+  ];
+}
+
 /** Parts the merged evidence still does not answer, with a targeted follow-up query for each. */
 export function missingPartQueries(question: string, evidenceText: string): string[] {
   const text = stripHarnessPrefix(question);
   const topic = topicPhrase(text);
   const checks: { when: RegExp; covered: RegExp; queries: string[] }[] = [
     {
-      when: /\bcontractor\b/i,
+      when: CONSTRUCTION_QUESTION,
       covered: /\bawarded to\s+[A-Z]|\b(?:Co\.|Inc\.|LLC|Corp\.)\b/,
-      queries: [`${topic} construction contract awarded`, `${topic} construction bid award contractor`],
+      queries: contractorQueries(text),
     },
     {
       when: /\b(?:how much|what did it cost|contract amount)\b/i,
@@ -148,6 +313,7 @@ export function missingPartQueries(question: string, evidenceText: string): stri
       queries: [
         "overnight parking ordinance adopted 2023",
         "overnight parking ordinance adopted 2024",
+        "overnight parking motion approved",
         "overnight parking permit expansion board minutes",
         "Legistar overnight parking legislation",
       ],
@@ -163,14 +329,24 @@ export function missingPartQueries(question: string, evidenceText: string): stri
 
 /** Ordinance numbers and company names already in the evidence, searched again instead of guessed. */
 export function discoveredSearchTerms(topic: string, evidenceText: string): string[] {
-  const ids = [...evidenceText.matchAll(/\b(?:ORD|MOT|RES)\s*\d{2}-\d{2,4}\b/gi)].map((match) => match[0].replace(/\s+/g, " "));
+  const idQueries = legislativeIds(evidenceText).flatMap((id) => legislativeIdQueries(id));
   const companies = [...evidenceText.matchAll(/\b([A-Z][A-Za-z&'.-]+(?:\s+[A-Z][A-Za-z&'.-]+){0,3}\s(?:Co\.|Inc\.|LLC|Corp\.|Company))\b/g)].map((match) => match[1]);
-  return [...ids.map((id) => `${topic} ${id}`), ...companies.map((name) => `${topic} ${name}`)];
+  return [...idQueries, ...companies.map((name) => `${topic} ${name}`)];
 }
 
 /** Targeted file-search queries. Person, year, and multi-part coverage is kept even if the planner is vague. */
 export function draftResearchQueries(question: string, now = new Date()): string[] {
   const cleaned = stripHarnessPrefix(question);
+  return uniqueQueries([
+    ...coreResearchQueries(cleaned, now),
+    ...legislativeQueryVariants(cleaned),
+    ...legislativeIds(cleaned).flatMap((id) => legislativeIdQueries(id)),
+    ...contractorQueries(cleaned),
+  ]);
+}
+
+function coreResearchQueries(question: string, now: Date): string[] {
+  const cleaned = question;
   const name = personName(cleaned);
   if (name) {
     return uniqueQueries([
@@ -222,7 +398,7 @@ export function draftResearchQueries(question: string, now = new Date()): string
     .map((part) => part.trim())
     .filter((part) => part.length > 12);
   const queries = parts.length >= 2 ? parts : [cleaned, `${cleaned} minutes`, `${cleaned} ordinance`];
-  return uniqueQueries(queries);
+  return queries;
 }
 
 export function mergeResearchQueries(required: string[], planned: string[]): string[] {
@@ -347,6 +523,13 @@ export function scoreEvidence(item: Omit<EvidenceItem, "tier" | "rankScore">, qu
   const boost = dateBoostFor(item.recordDate, calendarStamp(now), questionAsksAboutHistory(question));
   let rankScore = item.score * boost * (item.kind === "record" ? typeBoost(item.documentType) : 1);
   if (isBoardRosterQuestion(question) && /village-board/i.test(item.url ?? "")) rankScore += 5;
+  if (asksAboutConstruction(question)) {
+    const blob = `${item.filename}\n${item.title ?? ""}\n${item.text}`;
+    const design = /\b(?:design|engineering|consultant|architectural)\b/i.test(blob);
+    const construction = /\b(?:construction|awarded to|lettings?|IDOT|budget explanations?)\b/i.test(blob);
+    if (design && !construction) rankScore *= 0.5;
+    if (construction) rankScore *= 1.2;
+  }
   return { ...item, tier, rankScore };
 }
 
@@ -496,7 +679,7 @@ async function searchRecords(
   input: {
     vectorStoreIds: string[];
     query: string;
-    filters?: ComparisonFilter;
+    filters?: ComparisonFilter | CompoundFilter;
     question: string;
     now: Date;
     signal?: AbortSignal;
@@ -703,6 +886,9 @@ async function runWebPass(
   }
 }
 
+export const RESEARCH_PLANNER_INSTRUCTIONS =
+  'Return JSON only: {"queries":["..."]}. Write 3 to 6 short file-search queries. One query per part of the question. For a span of years, one query per year. For a person, include the name with trustee, village board, roll call, budget, and president. When the question is about an ordinance, law, rule, resolution, motion, policy, or an adopted change, also query the motion, the resolution, and the agenda or minutes, using the words motion, approved, and adopted. A legislative ID (ORD, RES, or MOT plus a number, including an Ord. form) is often only on an agenda, in the minutes, or in code history, so search that ID and the subject described next to it. When the question asks who built the work, who was awarded it, or names a contractor or vendor, query the construction contract award, budget explanations, and the letting, and do not stop at a design or engineering consultant. Do not answer the question.';
+
 async function planQueries(
   client: OpenAI,
   input: { question: string; signal?: AbortSignal; requestId: string },
@@ -712,7 +898,7 @@ async function planQueries(
       model: process.env.MUNIGPT_PLANNER_MODEL?.trim() || DEFAULT_REASONING_MODEL,
       reasoning: { effort: "none" },
       max_output_tokens: 4_000,
-      instructions: 'Return JSON only: {"queries":["..."]}. Write 3 to 6 short file-search queries. One query per part of the question. For a span of years, one query per year. For a person, include the name with trustee, village board, roll call, budget, and president. Do not answer the question.',
+      instructions: RESEARCH_PLANNER_INSTRUCTIONS,
       input: input.question,
     },
     { timeout: PLAN_TIMEOUT_MS, signal: input.signal },
@@ -832,10 +1018,11 @@ export async function runResearchTurn(input: {
   const boardPage = boardRosterEvidence(input.slug, question, now);
   let evidence = mergeEvidence([...recordGroups.flat(), ...web.items, ...(boardPage ? [boardPage] : [])]);
   const gaps = missingPartQueries(question, evidence.map((item) => item.text).join("\n"));
+  const idFollowUps = legislativeResolutionQueries(evidence);
   let followUpCalls = 0;
-  if (gaps.length > 0 && remaining() > 20_000) {
+  if ((gaps.length > 0 || idFollowUps.length > 0) && remaining() > 20_000) {
     input.onProgress?.("Searching for the missing part…");
-    console.info(`[${input.requestId}] follow-up searches ${JSON.stringify(gaps)}`);
+    console.info(`[${input.requestId}] follow-up searches ${JSON.stringify([...gaps, ...idFollowUps.map((item) => item.query)])}`);
     const extra = await Promise.all(gaps.map((query) => searchRecords(input.client, {
       vectorStoreIds: input.vectorStoreIds,
       query,
@@ -847,8 +1034,40 @@ export async function runResearchTurn(input: {
       console.error(`[${input.requestId}] Follow-up search failed.`, error);
       return [] as EvidenceItem[];
     })));
-    followUpCalls = extra.length;
-    evidence = mergeEvidence([...evidence, ...extra.flat()]);
+    const descriptions = idFollowUps.map((item) => item.query);
+    const descriptionGroups = await Promise.all(descriptions.map((query) => searchRecords(input.client, {
+      vectorStoreIds: input.vectorStoreIds,
+      query,
+      question,
+      now,
+      signal: input.signal,
+    }).catch((error: unknown) => {
+      if (isAbort(error) && input.signal?.aborted) throw error;
+      console.error(`[${input.requestId}] Legislative follow-up failed.`, error);
+      return [] as EvidenceItem[];
+    })));
+    const dated = idFollowUps.filter((item): item is LegislativeFollowUp & { dateStart: number; dateEnd: number } =>
+      item.dateStart !== undefined && item.dateEnd !== undefined).slice(0, 3);
+    const datedGroups = await Promise.all(dated.map((item) => searchRecords(input.client, {
+      vectorStoreIds: input.vectorStoreIds,
+      query: item.query,
+      filters: {
+        type: "and",
+        filters: [
+          { type: "gte", key: "record_date", value: item.dateStart },
+          { type: "lte", key: "record_date", value: item.dateEnd },
+        ],
+      },
+      question,
+      now,
+      signal: input.signal,
+    }).catch((error: unknown) => {
+      if (isAbort(error) && input.signal?.aborted) throw error;
+      console.error(`[${input.requestId}] Legislative follow-up failed.`, error);
+      return [] as EvidenceItem[];
+    })));
+    followUpCalls = extra.length + descriptionGroups.length + datedGroups.length;
+    evidence = mergeEvidence([...evidence, ...extra.flat(), ...descriptionGroups.flat(), ...datedGroups.flat()]);
     if (webOn && remaining() > 25_000) {
       const focus = gaps.slice(0, 3).join(". ");
       const extraWeb = await Promise.all([
