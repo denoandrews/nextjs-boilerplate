@@ -42,90 +42,84 @@ const OAK_PARK_MEETINGS_URL = "https://www.oak-park.us/Government/Meetings/Villa
 
 const OAK_PARK_PAGES: OfficialPage[] = [
   {
-    title: "Village Board agendas, minutes, and videos",
+    title: "Board meetings",
     url: OAK_PARK_MEETINGS_URL,
-    useWhen:
-      "Use for the next or latest Village Board meeting, agendas, minutes, and videos. If the records do not include a future meeting, say that in the first sentence, give the latest meeting as already passed, and give this page for the upcoming schedule. Do not present a past meeting, including October 13, 2026 on a later day, as the next meeting.",
+    useWhen: "Next or latest meeting, agendas, minutes, and videos.",
   },
   {
-    title: "Village Board and trustees",
+    title: "Village website",
+    url: "https://www.oak-park.us/",
+    useWhen: "Person records may be incomplete.",
+  },
+  {
+    title: "Village Board",
     url: "https://www.oak-park.us/Government/Leadership/Village-Board",
-    useWhen: "Use for who the trustees and Village President are and how to contact the Board.",
+    useWhen: "Trustees and the Village President.",
   },
   {
-    title: "Freedom of Information Act",
+    title: "FOIA",
     url: "https://www.oak-park.us/Government/Information-and-Resources/Freedom-of-Information-Act-FOIA",
-    useWhen:
-      "Use for how to request public records. Do not answer a FOIA question from an unrelated study or remedial-action plan.",
+    useWhen: "How to request public records.",
   },
   {
     title: "Parking permits",
     url: "https://www.oak-park.us/Services-Parking/Parking-Mobility-Services/Parking-Permits",
-    useWhen:
-      "Use only for parking permits, permit maps, and vehicle licenses. Do not use this page for a parking ticket, a fine, or how to pay or contest a citation.",
+    useWhen: "Permits and vehicle licenses, not tickets.",
   },
   {
     title: "Parking enforcement",
     url: "https://www.oak-park.us/Services-Parking/Parking-Mobility-Services/Parking-Enforcement",
-    useWhen:
-      "Use for a parking ticket, how to pay or contest one, and the parking-enforcement contact. Parking fines are collected by the Office of Adjudication, not by the permits desk. Lakeshore Recycling Systems is the waste hauler and is not a parking provider. A parking-services request for proposal or other vendor proposal is not the current payment policy and may be outdated.",
+    useWhen: "Tickets. Lakeshore Recycling Systems is not a parking provider.",
   },
   {
-    title: "Office of Adjudication",
+    title: "Adjudication",
     url: "https://www.oak-park.us/Government/Departments/Office-of-Adjudication",
-    useWhen:
-      "Use for contesting a parking ticket or other municipal citation and for how fines are collected. Do not send a ticket question to the parking permits page.",
+    useWhen: "Contesting a citation and how fines are collected.",
   },
   {
     title: "Waste and recycling",
     url: "https://www.oak-park.us/Services-Parking/Waste-Recycling",
-    useWhen: "Use for an overview of trash, recycling, and yard-waste service.",
+    useWhen: "Trash, recycling, and yard waste.",
   },
   {
-    title: "Garbage and yard waste collection",
+    title: "Garbage collection",
     url: "https://www.oak-park.us/Services-Parking/Waste-Recycling/Garbage-Collection",
-    useWhen:
-      "Use when someone asks how to find their pickup day. Say that the day depends on the address, that buildings of five or fewer units are collected once a week, and that trash, recycling, and yard waste share that weekday. Give this page. Do not invent a weekday.",
+    useWhen: "How to find a pickup day. Do not invent a weekday.",
   },
   {
-    title: "Collection information from the Village hauler, Lakeshore Recycling Systems",
+    title: "Lakeshore Recycling Systems",
     url: "https://www.lrsrecycles.com/municipality/oak-park/",
-    useWhen:
-      "Share this with the Village garbage page when someone needs their own pickup day or needs to report a missed pickup. Lakeshore Recycling Systems is the waste and recycling hauler only. Never describe it as the parking provider or send a parking-ticket question here.",
+    useWhen: "Missed pickup. The waste hauler is not a parking provider.",
   },
   {
     title: "Building permits",
     url: "https://www.oak-park.us/Building-Business/Building-Permits",
-    useWhen:
-      "Use for sheds, garages, decks, fences, and other construction permits, and for where current permit fees are published. A vendor proposal, bid, or request for proposal is not the current fee schedule and may be outdated. Prefer this page over an older proposal.",
+    useWhen: "Permits and where current fees are published.",
   },
   {
     title: "Zoning",
     url: "https://www.oak-park.us/Building-Business/Development/Zoning",
-    useWhen: "Use for where the current zoning ordinance and zoning map are published.",
+    useWhen: "Zoning ordinance and map.",
   },
   {
-    title: "Current zoning ordinance (adopted September 18, 2017; revised April 3, 2026)",
+    title: "Zoning ordinance",
     url: "https://www.oak-park.us/files/assets/oakpark/v/3/development-services/planning/__2017-oak-park-zoning-ordinance-revised.04.03.2026x.pdf",
-    useWhen:
-      "Prefer this over a file labeled DRAFT. This is the only 2017 filename that can still be current, and only because it was revised April 3, 2026. Do not apply that exception to agendas or minutes.",
+    useWhen: "Prefer this adopted file over a DRAFT.",
   },
   {
-    title: "Fence guidelines (August 2025)",
+    title: "Fence guidelines",
     url: "https://www.oak-park.us/files/assets/oakpark/v/1/development-services/permits/fence-guidelines-2025-08.pdf",
-    useWhen:
-      "These August 2025 guidelines are the current fence rules. A permit is required, except for repair or replacement of existing fencing in a single or cumulative area not exceeding 100 square feet. Say that directly when asked whether a permit is required. Do not call a 2022 ordinance the current rule when these guidelines are available.",
+    useWhen: "Fence permits and fence rules.",
   },
   {
     title: "Village Code",
     url: "https://codelibrary.amlegal.com/codes/oakparkil/latest/overview",
-    useWhen: "Use for codified ordinances, including noise and other rules that a draft or unrelated plan does not establish.",
+    useWhen: "Codified ordinances.",
   },
   {
-    title: "FY2026 budget book",
+    title: "Budget book",
     url: "https://www.oak-park.us/files/assets/oakpark/v/2/finance/budgets/fy26-budget-book-final.pdf",
-    useWhen:
-      "Use for budget figures. If asked for the general fund, state the FY2026 general fund total of $114,695,709. A property tax levy is not the general fund budget. The $19,125,000 levy is separate; mention it in one later sentence only, and do not open with it unless the user or an earlier turn mentions that levy.",
+    useWhen: "A property tax levy is not the general fund budget.",
   },
 ];
 
@@ -144,7 +138,7 @@ const OAK_PARK_FILENAME_LINKS: FilenameLink[] = [
   },
 ];
 
-const OAK_PARK_HOSTS = ["oak-park.us", "lrsrecycles.com", "codelibrary.amlegal.com"];
+const OAK_PARK_HOSTS = ["oak-park.us", "oak-park.legistar.com", "lrsrecycles.com", "codelibrary.amlegal.com"];
 
 const OAK_PARK_MENTIONS: { source: string; url: string }[] = [
   { source: "garbage collection page", url: "https://www.oak-park.us/Services-Parking/Waste-Recycling/Garbage-Collection" },

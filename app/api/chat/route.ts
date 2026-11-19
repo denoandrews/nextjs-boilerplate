@@ -2,13 +2,16 @@ import OpenAI from "openai";
 import { clarifyLevyAnswer } from "@/lib/answer-quality";
 import { newspaperDomains, extractCitedAnswer } from "@/lib/news-search";
 import { resolveChatModel } from "@/lib/chat-model";
-import { buildChatInstructions, getMaxOutputTokens } from "@/lib/chat-instructions";
+import { buildChatInstructions, getMaxOutputTokens, getRetryOutputTokens } from "@/lib/chat-instructions";
+import { logChatDiagnostics } from "@/lib/chat-diagnostics";
 import { fileSearchFilters, fileSearchTool, loadAttributeIndex } from "@/lib/file-search";
+import { researchModeEnabled, runResearchTurn, stripHarnessPrefix } from "@/lib/research";
+import { webPassEnabled, webSearchDomains } from "@/lib/web-sources";
 import { turnLanguageDirective } from "@/lib/ui-locale";
 import { OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT_MS, requestTimedOut } from "@/lib/chat-request";
 import { reserveChatQuery } from "@/lib/chat-limits";
 import { logChatExchange } from "@/lib/chat-logging";
-import { extractChatUsage, logUsageEvent } from "@/lib/chat-usage";
+import { addChatUsage, extractChatUsage, logUsageEvent } from "@/lib/chat-usage";
 import { documentSourceUrls } from "@/lib/document-urls";
 import { withStoredSourceUrls } from "@/lib/source-links";
 import { getMunicipalityConfig } from "@/lib/municipalities";
@@ -33,6 +36,7 @@ type ChatRequest = {
   municipalitySlug?: unknown;
   conversationId?: unknown;
   anonymousSessionId?: unknown;
+  streamProgress?: unknown;
 };
 
 function jsonResponse(body: unknown, status: number, requestId: string) {
@@ -65,6 +69,38 @@ function parseHistory(value: unknown): HistoryMessage[] {
     }));
 }
 
+function eventStream(requestId: string, work: (send: (event: Record<string, unknown>) => void) => Promise<void>) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      };
+      try {
+        await work(send);
+      } catch (error: unknown) {
+        console.error(`[${requestId}] Chat stream failed.`, error);
+        send({
+          type: "error",
+          error: requestTimedOut(error)
+            ? "That search took too long. Please try again."
+            : "MuniGPT could not complete that request. Please try again.",
+          requestId,
+        });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Request-ID": requestId,
+    },
+  });
+}
+
 function buildInput(history: HistoryMessage[], userText: string, attributeIndex?: string | null) {
   return [
     ...history.map((message) => ({
@@ -82,13 +118,14 @@ export async function POST(req: Request) {
 
   try {
     const body = (await req.json().catch(() => ({}))) as ChatRequest;
-    const message = typeof body.message === "string" ? body.message.trim() : "";
+    const rawMessage = typeof body.message === "string" ? body.message.trim() : "";
+    const message = stripHarnessPrefix(rawMessage);
 
-    if (!message) {
+    if (!rawMessage || !message) {
       return jsonResponse({ error: "Type a question and press Send.", requestId }, 400, requestId);
     }
 
-    if (message.length > MAX_MESSAGE_LENGTH) {
+    if (rawMessage.length > MAX_MESSAGE_LENGTH) {
       return jsonResponse(
         {
           error: `Questions must be ${MAX_MESSAGE_LENGTH.toLocaleString()} characters or fewer.`,
@@ -153,10 +190,89 @@ export async function POST(req: Request) {
       maxRetries: OPENAI_MAX_RETRIES,
     });
     const newsDomains = newspaperDomains(municipality.slug);
-    // Domain-filtered newspaper search needs a model newer than GPT-4.1 Mini.
+    // The forced website pass can be turned off. The quick path then keeps newspapers only.
+    const searchDomains = webPassEnabled(municipality.slug) ? webSearchDomains(municipality.slug) : newsDomains;
+    // Domain-filtered web search needs a model newer than GPT-4.1 Mini.
     // gpt-5.4-mini stays the default there. A municipality with no reasoning-capable
     // default is moved to that model so medium reasoning can be sent.
-    const { model, reasoning } = resolveChatModel({ newsEnabled: newsDomains.length > 0 });
+    const { model, reasoning } = resolveChatModel({ newsEnabled: newsDomains.length > 0 || searchDomains.length > 0 });
+    const historyText = history.map((item) => item.content).join("\n");
+    const conversationId =
+      typeof body.conversationId === "string" ? body.conversationId.slice(0, 80) : undefined;
+
+    const publish = async (result: {
+      answer: string;
+      citations: { fileId: string; filename: string; url?: string; marker?: string }[];
+      newsSearched: boolean;
+      officialSearched: boolean;
+      usage: ReturnType<typeof extractChatUsage>;
+    }) => {
+      const storedUrls = await documentSourceUrls(
+        municipality.id,
+        result.citations.map((citation) => citation.fileId),
+      );
+      const citations = withStoredSourceUrls(result.citations, storedUrls);
+      console.info(`[${requestId}] chat usage ${JSON.stringify({
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        reasoningTokens: result.usage.reasoningTokens ?? 0,
+        totalTokens: result.usage.totalTokens,
+        fileSearchCalls: result.usage.fileSearchCalls,
+        webSearchCalls: result.usage.webSearchCalls ?? 0,
+        estimatedCostMicrousd: result.usage.estimatedCostMicrousd,
+        newsSearched: result.newsSearched,
+        officialSearched: result.officialSearched,
+      })}`);
+      await logUsageEvent({
+        municipalityId: municipality.id,
+        requestId,
+        model,
+        ...result.usage,
+      });
+      const finalAnswer = clarifyLevyAnswer(message, result.answer, historyText) || "I could not establish an answer from the available records.";
+      const logged = await logChatExchange({
+        municipalityId: municipality.id,
+        conversationId,
+        anonymousSessionId,
+        question: message,
+        answer: finalAnswer,
+        citations,
+        requestId,
+        model,
+      });
+      return {
+        answer: finalAnswer,
+        citations,
+        newsSearched: result.newsSearched,
+        officialSearched: result.officialSearched,
+        municipality: municipality.name,
+        conversationId: logged.conversationId,
+        requestId,
+      };
+    };
+
+    if (researchModeEnabled(municipality.slug)) {
+      const run = (onProgress?: (status: string) => void) => runResearchTurn({
+        client,
+        slug: municipality.slug,
+        municipalityName: municipality.name,
+        vectorStoreIds: municipality.vectorStoreIds,
+        question: message,
+        history,
+        model,
+        reasoning,
+        signal: req.signal,
+        requestId,
+        onProgress,
+      });
+      if (body.streamProgress === true) {
+        return eventStream(requestId, async (send) => {
+          const researched = await run((status) => send({ type: "progress", message: status }));
+          send({ type: "result", ...(await publish(researched)) });
+        });
+      }
+      return jsonResponse(await publish(await run()), 200, requestId);
+    }
     const filters = fileSearchFilters(message, municipality.slug);
     const attributeIndex = await loadAttributeIndex(client, {
       slug: municipality.slug,
@@ -167,75 +283,72 @@ export async function POST(req: Request) {
       requestId,
     });
 
-    const response = await client.responses.create(
-      {
-        model,
-        max_output_tokens: getMaxOutputTokens(model, reasoning?.effort),
-        ...(reasoning ? { reasoning } : {}),
-        instructions: buildChatInstructions({
-          municipalityName: municipality.name,
-          slug: municipality.slug,
-          newsEnabled: newsDomains.length > 0,
-          question: message,
-        }),
-        input: buildInput(history, message, attributeIndex),
-        include: ["file_search_call.results"],
-        tools: [
-          fileSearchTool(municipality.vectorStoreIds, filters),
-          ...(newsDomains.length ? [{
-            type: "web_search" as const,
-            filters: { allowed_domains: newsDomains },
-            external_web_access: true,
-            search_context_size: "low" as const,
-          }] : []),
-        ],
-      },
-      { signal: req.signal }
-    );
-
-    const extracted = extractCitedAnswer(response, newsDomains.length > 0, { slug: municipality.slug });
-    const storedUrls = await documentSourceUrls(
-      municipality.id,
-      extracted.citations.map((citation) => citation.fileId)
-    );
-    const citations = withStoredSourceUrls(extracted.citations, storedUrls);
-    const { answer, newsSearched } = extracted;
-    const usage = extractChatUsage(response, model);
-
-    await logUsageEvent({
-      municipalityId: municipality.id,
-      requestId,
+    const requestBody = {
       model,
-      ...usage,
-    });
+      max_output_tokens: getMaxOutputTokens(model, reasoning?.effort),
+      ...(reasoning ? { reasoning } : {}),
+      instructions: buildChatInstructions({
+        municipalityName: municipality.name,
+        slug: municipality.slug,
+        newsEnabled: newsDomains.length > 0,
+        question: message,
+      }),
+      input: buildInput(history, message, attributeIndex),
+      include: ["file_search_call.results" as const],
+      tools: [
+        fileSearchTool(municipality.vectorStoreIds, filters),
+        ...(searchDomains.length ? [{
+          type: "web_search" as const,
+          filters: { allowed_domains: searchDomains },
+          external_web_access: true,
+          search_context_size: "low" as const,
+        }] : []),
+      ],
+    };
 
-    const historyText = history.map((item) => item.content).join("\n");
-    const finalAnswer = clarifyLevyAnswer(message, answer, historyText) || "I could not establish an answer from the available records.";
-    const conversationId =
-      typeof body.conversationId === "string" ? body.conversationId.slice(0, 80) : undefined;
-    const logged = await logChatExchange({
-      municipalityId: municipality.id,
-      conversationId,
-      anonymousSessionId,
-      question: message,
-      answer: finalAnswer,
-      citations,
-      requestId,
-      model,
-    });
+    const response = await client.responses.create(requestBody, { signal: req.signal });
+    const firstDiagnostics = logChatDiagnostics(requestId, response);
+    let extracted = extractCitedAnswer(response, searchDomains.length > 0 || newsDomains.length > 0, { slug: municipality.slug });
+    let usage = extractChatUsage(response, model);
 
-    return jsonResponse(
-      {
-        answer: finalAnswer,
-        citations,
-        newsSearched,
-        municipality: municipality.name,
-        conversationId: logged.conversationId,
-        requestId,
-      },
-      200,
-      requestId
-    );
+    // A reasoning model can spend the whole output budget before it writes any
+    // text. One low-effort retry is cheaper than returning an empty answer.
+    if (!extracted.answer.trim()) {
+      console.info(
+        `[${requestId}] Empty answer (status=${firstDiagnostics.status ?? "unknown"}, incomplete=${firstDiagnostics.incompleteReason ?? "none"}, reasoningTokens=${firstDiagnostics.reasoningTokens}, searchCount=${firstDiagnostics.searchCount}). Retrying once at low effort.`,
+      );
+      try {
+        const retry = await client.responses.create(
+          {
+            ...requestBody,
+            max_output_tokens: getRetryOutputTokens(model, reasoning?.effort),
+            ...(reasoning ? { reasoning: { effort: "low" as const } } : {}),
+          },
+          { signal: req.signal },
+        );
+        const retryDiagnostics = logChatDiagnostics(requestId, retry);
+        const retryExtracted = extractCitedAnswer(retry, searchDomains.length > 0 || newsDomains.length > 0, { slug: municipality.slug });
+        usage = addChatUsage(usage, extractChatUsage(retry, model), model);
+        if (retryExtracted.answer.trim()) {
+          extracted = retryExtracted;
+        } else {
+          console.info(
+            `[${requestId}] Low-effort retry also returned no text (status=${retryDiagnostics.status ?? "unknown"}, incomplete=${retryDiagnostics.incompleteReason ?? "none"}).`,
+          );
+        }
+      } catch (error) {
+        if (requestTimedOut(error)) throw error;
+        console.error(`[${requestId}] Empty-answer retry failed.`, error);
+      }
+    }
+
+    return jsonResponse(await publish({
+      answer: extracted.answer,
+      citations: extracted.citations,
+      newsSearched: extracted.newsSearched,
+      officialSearched: extracted.citations.some((citation) => citation.marker?.startsWith("[Official")),
+      usage,
+    }), 200, requestId);
   } catch (error: unknown) {
     console.error(`[${requestId}] Chat request failed.`, error);
     const timedOut = requestTimedOut(error);

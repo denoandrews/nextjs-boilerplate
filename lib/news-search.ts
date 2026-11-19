@@ -1,6 +1,7 @@
 import type OpenAI from "openai";
 import { allowedAnswerUrl, citationUrlForFile, excludedCitationFilename, officialMentions, safeHttpsUrl } from "@/lib/source-links";
 import { uiLocale } from "@/lib/ui-locale";
+import { matchWebUrl, newspaperDomainsFor } from "@/lib/web-sources";
 
 const NEWSPAPER_DOMAINS = ["oakpark.com", "chicagotribune.com"];
 
@@ -12,18 +13,28 @@ export type ChatCitation = {
 };
 
 export function newspaperDomains(slug: string): string[] {
-  return slug === "oak-park-il" ? [...NEWSPAPER_DOMAINS] : [];
+  return newspaperDomainsFor(slug);
 }
 
 export function approvedNewspaperUrl(value: string): string | null {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "https:" || url.username || url.password) return null;
-    if (!NEWSPAPER_DOMAINS.some((domain) => url.hostname === domain || url.hostname.endsWith(`.${domain}`))) return null;
-    return url.href;
-  } catch {
-    return null;
+  const matched = matchWebUrl(value);
+  if (!matched || matched.kind !== "newspaper") {
+    // Keep the historical newspaper list so a citation still resolves if config is empty.
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "https:" || url.username || url.password) return null;
+      if (!NEWSPAPER_DOMAINS.some((domain) => url.hostname === domain || url.hostname.endsWith(`.${domain}`))) return null;
+      return url.href;
+    } catch {
+      return null;
+    }
   }
+  return matched.url;
+}
+
+export function approvedOfficialUrl(value: string): string | null {
+  const matched = matchWebUrl(value);
+  return matched?.kind === "official" ? matched.url : null;
 }
 
 const CITATION_MARKER = /\uE200(?:cite|filecite)\uE202([^\uE201]*)\uE201/g;
@@ -154,6 +165,7 @@ export function extractCitedAnswer(
   const attributeUrls = fileAttributeUrls(response);
   const paragraphs: string[] = [];
   let newsNumber = 0;
+  let officialNumber = 0;
   for (const item of response.output) {
     if (item.type !== "message") continue;
     for (const content of item.content) {
@@ -175,16 +187,19 @@ export function extractCitedAnswer(
             ...(url ? { url } : {}),
           });
         } else if (annotation.type === "url_citation" && allowNews) {
-          const url = approvedNewspaperUrl(annotation.url);
+          const officialUrl = approvedOfficialUrl(annotation.url);
+          const newsUrl = officialUrl ? null : approvedNewspaperUrl(annotation.url);
+          const url = officialUrl ?? newsUrl;
           if (!url) continue;
           let citation = citations.get(url);
           if (!citation) {
-            newsNumber += 1;
+            if (officialUrl) officialNumber += 1;
+            else newsNumber += 1;
             citation = {
               fileId: url,
               filename: annotation.title || new URL(url).hostname,
               url,
-              marker: `[News ${newsNumber}]`,
+              marker: officialUrl ? `[Official ${officialNumber}]` : `[News ${newsNumber}]`,
             };
             citations.set(url, citation);
           }
@@ -224,9 +239,9 @@ export function extractCitedAnswer(
 }
 
 export function splitNewsReferences(text: string, citations: ChatCitation[] = []) {
-  const links = new Map(citations.filter((citation) => citation.marker && citation.url && approvedNewspaperUrl(citation.url))
+  const links = new Map(citations.filter((citation) => citation.marker && citation.url && (approvedNewspaperUrl(citation.url) || approvedOfficialUrl(citation.url)))
     .map((citation) => [citation.marker!, citation]));
-  return text.split(/(\[News \d+\])/g).filter(Boolean).map((part) => ({ text: part, citation: links.get(part) }));
+  return text.split(/(\[(?:News|Official) \d+\]|\[\d+\])/g).filter(Boolean).map((part) => ({ text: part, citation: links.get(part) }));
 }
 
 export type AnswerSegment = { text: string; href?: string };
