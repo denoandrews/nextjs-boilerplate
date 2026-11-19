@@ -83,6 +83,23 @@ describe("municipal clock and instructions", () => {
     expect(instructions).not.toContain("Language for this turn: English.");
   });
 
+  it("tells research mode to weave newspaper findings into the answer", () => {
+    const instructions = buildChatInstructions({
+      municipalityName: "Village of Oak Park",
+      slug: "oak-park-il",
+      newsEnabled: true,
+      researchMode: true,
+      now: new Date("2026-10-19T18:00:00.000Z"),
+      question: "Who is Robert Milstein?",
+    });
+    expect(instructions).toContain("integrate that finding into the answer prose");
+    expect(instructions).toContain("Cite both official sources and newspaper reporting");
+    expect(instructions).toContain("who a person is");
+    expect(instructions).toContain("use every newspaper result that mentions that person");
+    expect(instructions).not.toContain("The Wednesday Journal reported:");
+    expect(instructions).not.toContain("Milstein");
+  });
+
   it("does not give another municipality Oak Park's pages", () => {
     const instructions = buildChatInstructions({
       municipalityName: "Strawberry Point",

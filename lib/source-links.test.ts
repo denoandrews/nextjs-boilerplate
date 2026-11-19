@@ -22,6 +22,8 @@ describe("official source links", () => {
     expect(safeHttpsUrl("javascript:alert(1)")).toBeNull();
     expect(safeHttpsUrl("http://www.oak-park.us/a")).toBeNull();
     expect(safeHttpsUrl("https://user:secret@www.oak-park.us/a")).toBeNull();
+    expect(safeHttpsUrl("https://www.oak-park.us/budget?utm_source=openai")).toBe("https://www.oak-park.us/budget");
+    expect(safeHttpsUrl("https://www.oak-park.us/a?id=1&utm_source=openai")).toBe("https://www.oak-park.us/a?id=1");
     expect(allowedAnswerUrl("https://oak-park.us.evil.test/a", "oak-park-il")).toBeNull();
     expect(allowedAnswerUrl("https://www.oak-park.us/Government/Leadership/Village-Board", "oak-park-il")).toBeTruthy();
     expect(allowedAnswerUrl("https://www.oak-park.us/a", "strawberry-point-ia")).toBeNull();

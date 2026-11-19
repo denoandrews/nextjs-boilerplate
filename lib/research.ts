@@ -7,12 +7,13 @@ import { logChatDiagnostics } from "@/lib/chat-diagnostics";
 import { recordDateNumber, dateBoostFor, calendarStamp, questionAsksAboutHistory, shiftMonths } from "@/lib/file-search";
 import { excludedCitationFilename, officialPages } from "@/lib/source-links";
 import { addChatUsage, estimateCostMicrousd, extractChatUsage, type ChatUsage } from "@/lib/chat-usage";
-import { extractCitedAnswer, type ChatCitation } from "@/lib/news-search";
+import { extractCitedAnswer, omitInvalidCitationLines, type ChatCitation } from "@/lib/news-search";
 import { turnLanguageDirective } from "@/lib/ui-locale";
 import {
   officialWebDomains,
   newspaperDomainsFor,
   webPassEnabled,
+  canonicalHttpsUrl,
   matchWebUrl,
   type WebSourceKind,
 } from "@/lib/web-sources";
@@ -256,13 +257,77 @@ export function webResultIsRelevant(question: string, text: string): boolean {
   const haystack = text.toLowerCase();
   const name = personName(question);
   if (name) {
-    const parts = name.toLowerCase().split(/\s+/).filter((part) => part.length > 2);
-    const surname = parts[parts.length - 1];
+    const surname = personSurname(name);
     if (surname && !haystack.includes(surname)) return false;
   }
   const terms = significantTerms(question);
   if (terms.length === 0) return haystack.trim().length > 40;
   return terms.some((term) => haystack.includes(term));
+}
+
+const PLACE_LEADING = new Set([
+  "the", "a", "an", "of", "on", "for", "to", "at", "by", "from", "about", "and", "or", "in", "near", "along", "over",
+  "with", "what", "how", "who", "when", "where", "which", "this", "that", "did", "does", "was", "were", "has", "have",
+  "had", "been", "into", "its", "your", "not", "but", "also", "after", "before", "during", "between", "across",
+]);
+
+function normalizeOverlapText(text: string): string {
+  return stripHarnessPrefix(text)
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/\bave\.?\b/g, "avenue")
+    .replace(/\bst\.?\b/g, "street")
+    .replace(/\bblvd\.?\b/g, "boulevard")
+    .replace(/\brd\.?\b/g, "road")
+    .replace(/\bdr\.?\b/g, "drive")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Street, avenue, and road names in the question. "Oak Park Ave" matches "Oak Park Avenue". */
+export function placeEntities(question: string): string[] {
+  const normalized = normalizeOverlapText(question);
+  const pattern = /\b([a-z0-9]+(?:\s+[a-z0-9]+){0,2})\s+(street|avenue|road|boulevard|drive|lane|place|court|way)\b/g;
+  const entities: string[] = [];
+  for (const match of normalized.matchAll(pattern)) {
+    const words = (match[1] ?? "").split(/\s+/).filter(Boolean);
+    while (words.length > 0 && PLACE_LEADING.has(words[0] ?? "")) words.shift();
+    if (words.length === 0 || !match[2]) continue;
+    entities.push(`${words.join(" ")} ${match[2]}`);
+  }
+  return [...new Set(entities)];
+}
+
+function personSurname(name: string): string | null {
+  const parts = name.toLowerCase().split(/\s+/).filter((part) => part.length > 2);
+  return parts[parts.length - 1] ?? null;
+}
+
+/**
+ * Newspaper evidence must overlap the question's entity or topic.
+ * A named street has to appear; a shared word such as "streetscape" is not enough.
+ * A person question keeps a hit only when it names that person.
+ */
+export function newsEvidenceIsRelevant(question: string, text: string): boolean {
+  const haystack = normalizeOverlapText(text);
+  const name = personName(question);
+  if (name) {
+    const surname = personSurname(name);
+    return Boolean(surname && haystack.includes(surname));
+  }
+  const entities = placeEntities(question);
+  if (entities.length > 0) return entities.some((entity) => haystack.includes(entity));
+  return webResultIsRelevant(question, text);
+}
+
+export function evidenceSearchText(item: EvidenceItem): string {
+  return `${item.filename}\n${item.title ?? ""}\n${item.text}\n${item.url ?? ""}`;
+}
+
+/** Keep official records and website pages. Drop newspaper hits that are off the question. */
+export function filterNewsEvidence(question: string, items: EvidenceItem[]): EvidenceItem[] {
+  return items.filter((item) => item.kind !== "newspaper" || newsEvidenceIsRelevant(question, evidenceSearchText(item)));
 }
 
 export function overlapScore(question: string, text: string): number {
@@ -300,32 +365,56 @@ export function mergeEvidence(items: EvidenceItem[]): EvidenceItem[] {
   return [...official, ...news];
 }
 
+function evidenceUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  return canonicalHttpsUrl(url)?.href ?? undefined;
+}
+
 export function formatEvidence(items: EvidenceItem[], question = ""): string {
   if (items.length === 0) return "No municipal records, official website pages, or newspaper passages were retrieved for this question.";
   const lines = items.map((item, index) => {
     const source = item.kind === "newspaper" ? "newspaper reporting" : item.kind === "official" ? "official website" : "municipal record";
     const date = item.recordDate ? ` | record_date: ${item.recordDate}` : "";
     const type = item.documentType ? ` | document_type: ${item.documentType}` : "";
-    const url = item.url ? ` | url: ${item.url}` : "";
+    const href = evidenceUrl(item.url);
+    const url = href ? ` | url: ${href}` : "";
     return `[${index + 1}] source: ${source} | filename: ${item.filename}${date}${type}${url}\n${item.text}`;
   });
-  const roster = isBoardRosterQuestion(question)
-    ? " When the question asks who the Village President or trustees are, cite the official Village Board page."
-    : "";
-  const parking = /\bovernight parking\b/i.test(question) && /\b(?:current|policy)\b/i.test(question)
-    ? " For the current overnight parking policy, include 2023 and 2024 ordinance or Legistar changes that appear in the evidence, not only the current website summary."
-    : "";
-  return [
-    `Evidence for this question, already merged. Municipal records and official website pages are listed before newspaper reporting. Official website content is not newspaper reporting. Use only this evidence for facts. Cite the bracket number, such as [1], at the end of every factual sentence, including each relevant newspaper passage alongside the official sources. If a person appears only as a candidate or an objector here, say the records may be incomplete and do not conclude they were not a village official.${roster}${parking}`,
-    ...lines,
-  ].join("\n\n");
+  const news = items.filter((item) => item.kind === "newspaper");
+  const guidance = [
+    "Evidence for this question, already merged. Municipal records and official website pages are listed before newspaper reporting. Official website content is not newspaper reporting. Use only this evidence for facts. Cite the bracket number, such as [1], at the end of every factual sentence.",
+    "If a person appears only as a candidate or an objector here, say the records may be incomplete and do not conclude they were not a village official.",
+  ];
+  if (news.length > 0) {
+    guidance.push("Integrate each relevant newspaper finding into the answer prose and cite its bracket number there. Do not leave a relevant newspaper finding unused. Do not append a stock line such as \"The Wednesday Journal reported:\" after the answer.");
+    if (items.some((item) => item.kind !== "newspaper")) {
+      guidance.push("When both an official source and a newspaper passage are relevant, cite both.");
+    }
+  }
+  const name = personName(question);
+  if (name) {
+    const required = news.filter((item) => newsEvidenceIsRelevant(question, evidenceSearchText(item)));
+    if (required.length > 0) {
+      const markers = required.map((item) => `[${items.indexOf(item) + 1}]`).join(", ");
+      guidance.push(`This question asks who ${name} is. You must use every newspaper result that mentions ${name} (${markers}). State what that reporting says about ${name}, label it as reporting, and cite each of those numbers.`);
+    }
+  }
+  if (isBoardRosterQuestion(question)) {
+    guidance.push("When the question asks who the Village President or trustees are, cite the official Village Board page.");
+  }
+  if (/\bovernight parking\b/i.test(question) && /\b(?:current|policy)\b/i.test(question)) {
+    guidance.push("For the current overnight parking policy, include 2023 and 2024 ordinance or Legistar changes that appear in the evidence, not only the current website summary.");
+  }
+  return [guidance.join(" "), ...lines].join("\n\n");
 }
 
 /**
  * Renumber inline [n] markers to match the returned citation list, in the order
  * they first appear. Every returned citation, including a record, gets that marker.
+ * Stock newspaper lines with an empty or markdown body are removed first.
  */
 export function alignCitations(answer: string, items: EvidenceItem[]): { answer: string; citations: ChatCitation[] } {
+  const cleaned = omitInvalidCitationLines(answer);
   const order: number[] = [];
   const seen = new Set<number>();
   const add = (number: number) => {
@@ -333,18 +422,19 @@ export function alignCitations(answer: string, items: EvidenceItem[]): { answer:
     seen.add(number);
     order.push(number);
   };
-  for (const match of answer.matchAll(/\[(\d+)\]/g)) add(Number(match[1]));
+  for (const match of cleaned.matchAll(/\[(\d+)\]/g)) add(Number(match[1]));
   items.forEach((item, index) => {
-    if (item.url && answer.includes(item.url)) add(index + 1);
-    if (item.filename.length > 12 && answer.includes(item.filename)) add(index + 1);
+    const href = citationUrl(item);
+    if ((href && cleaned.includes(href)) || (item.url && cleaned.includes(item.url))) add(index + 1);
+    if (item.filename.length > 12 && cleaned.includes(item.filename)) add(index + 1);
   });
   const renumber = new Map(order.map((old, index) => [old, index + 1]));
-  const rewritten = answer.replace(/\[(\d+)\]/g, (full, raw: string) => {
+  const rewritten = cleaned.replace(/\[(\d+)\]/g, (full, raw: string) => {
     const next = renumber.get(Number(raw));
     return next ? `[${next}]` : full;
   });
   const citations = order.map((old, index) => citationForItem(items[old - 1], index + 1));
-  return citeRetrievedNews(rewritten, items, citations);
+  return { answer: rewritten, citations };
 }
 
 function citationUrl(item: EvidenceItem): string | undefined {
@@ -360,26 +450,6 @@ function citationForItem(item: EvidenceItem, number: number): ChatCitation {
     ...(url ? { url } : {}),
     marker: `[${number}]`,
   };
-}
-
-/** Relevant newspaper passages stay in the answer even when the model cites only official records. */
-export function citeRetrievedNews(
-  answer: string,
-  items: EvidenceItem[],
-  citations: ChatCitation[],
-): { answer: string; citations: ChatCitation[] } {
-  const cited = new Set(citations.map((citation) => citation.fileId));
-  const news = items.filter((item) => item.kind === "newspaper" && citationUrl(item) && !cited.has(item.id)).slice(0, 2);
-  if (news.length === 0) return { answer, citations };
-  const next = [...citations];
-  const lines = news.map((item) => {
-    const number = next.length + 1;
-    next.push(citationForItem(item, number));
-    const quote = item.text.split(/(?<=[.!?])\s/)[0]?.trim().slice(0, 280) || item.text.slice(0, 280);
-    const label = /tribune/i.test(item.url ?? item.filename) ? "The Chicago Tribune" : "The Wednesday Journal";
-    return `${label} reported: ${quote.replace(/\s+/g, " ")} [${number}]`;
-  });
-  return { answer: `${answer.trim()}\n\n${lines.join("\n\n")}`, citations: next };
 }
 
 export function parsePlannerQueries(text: string): string[] {
@@ -494,7 +564,10 @@ function webItemsFromResponse(
       try { return decodeURIComponent(url).replace(/[-_/]+/g, " "); } catch { return url; }
     })();
     const body = `${title}\n${excerpt}\n${path}`;
-    if (!matched || !webResultIsRelevant(question, body)) {
+    const relevant = matched?.kind === "newspaper"
+      ? newsEvidenceIsRelevant(question, body)
+      : webResultIsRelevant(question, body);
+    if (!matched || !relevant) {
       dropped += 1;
       return;
     }
@@ -529,7 +602,10 @@ function webItemsFromResponse(
         add(annotation.url, annotation.title || "", excerpt);
       }
       for (const url of urlsInText(text)) add(url, "", text.slice(0, 900));
-      if (annotations.length === 0 && urlsInText(text).length === 0 && webResultIsRelevant(question, text)) {
+      const textRelevant = fallbackKind === "newspaper"
+        ? newsEvidenceIsRelevant(question, text)
+        : webResultIsRelevant(question, text);
+      if (annotations.length === 0 && urlsInText(text).length === 0 && textRelevant) {
         items.push(scoreEvidence({
           id: `web-text:${fallbackKind}:${text.slice(0, 80)}`,
           kind: fallbackKind,
@@ -791,6 +867,7 @@ export async function runResearchTurn(input: {
   };
   usage = { ...usage, estimatedCostMicrousd: estimateCostMicrousd(usage, input.model) };
 
+  evidence = filterNewsEvidence(question, evidence);
   input.onProgress?.("Writing the answer…");
   const evidenceText = formatEvidence(evidence, question);
   const instructions = buildChatInstructions({

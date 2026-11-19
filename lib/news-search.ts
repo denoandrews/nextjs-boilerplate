@@ -1,7 +1,7 @@
 import type OpenAI from "openai";
 import { allowedAnswerUrl, citationUrlForFile, excludedCitationFilename, officialMentions, safeHttpsUrl } from "@/lib/source-links";
 import { uiLocale } from "@/lib/ui-locale";
-import { matchWebUrl, newspaperDomainsFor } from "@/lib/web-sources";
+import { canonicalHttpsUrl, matchWebUrl, newspaperDomainsFor } from "@/lib/web-sources";
 
 const NEWSPAPER_DOMAINS = ["oakpark.com", "chicagotribune.com"];
 
@@ -20,14 +20,10 @@ export function approvedNewspaperUrl(value: string): string | null {
   const matched = matchWebUrl(value);
   if (!matched || matched.kind !== "newspaper") {
     // Keep the historical newspaper list so a citation still resolves if config is empty.
-    try {
-      const url = new URL(value);
-      if (url.protocol !== "https:" || url.username || url.password) return null;
-      if (!NEWSPAPER_DOMAINS.some((domain) => url.hostname === domain || url.hostname.endsWith(`.${domain}`))) return null;
-      return url.href;
-    } catch {
-      return null;
-    }
+    const url = canonicalHttpsUrl(value);
+    if (!url) return null;
+    if (!NEWSPAPER_DOMAINS.some((domain) => url.hostname === domain || url.hostname.endsWith(`.${domain}`))) return null;
+    return url.href;
   }
   return matched.url;
 }
@@ -140,10 +136,39 @@ function clippedNote(answer: string) {
 }
 
 const DANGLING_HEADING = /(?:\n|^)\s*(?:#{1,3}\s*)?(?:What I couldn't find|Lo que no pude encontrar)\s*:?\s*$/i;
+const STOCK_CITATION_LINE = /^(?:The Wednesday Journal|The Chicago Tribune)\s+reported:\s*([\s\S]*)$/i;
+
+/**
+ * A stock newspaper line is unusable when its body is empty or a markdown
+ * fragment, such as "* list a specific pickup day."
+ */
+export function citationLineBodyIsUsable(body: string): boolean {
+  const trimmed = body.replace(/\s*\[\d+\]\s*$/g, "").replace(/\s+/g, " ").trim();
+  if (!trimmed) return false;
+  if (/^(?:[-*+]|\d+[.)])\s/.test(trimmed)) return false;
+  if (/^#{1,6}(?:\s|$)/.test(trimmed)) return false;
+  if (/^>\s?/.test(trimmed)) return false;
+  const prose = trimmed.replace(/^(?:[-*+>#]+|\d+[.)])\s*/g, "").trim();
+  return prose.length > 0;
+}
+
+/** Drop stock newspaper lines whose body is empty or a markdown fragment. */
+export function omitInvalidCitationLines(answer: string): string {
+  return answer
+    .split("\n")
+    .filter((line) => {
+      const match = line.trim().match(STOCK_CITATION_LINE);
+      if (!match) return true;
+      return citationLineBodyIsUsable(match[1] ?? "");
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 /** Drop a heading that has no following text, then close an answer the model did not finish. */
 export function presentAnswer(answer: string, incomplete: boolean): string {
-  const stripped = answer.trim().replace(DANGLING_HEADING, "").trim();
+  const stripped = omitInvalidCitationLines(answer.trim().replace(DANGLING_HEADING, "").trim());
   if (!incomplete) return stripped;
   return closeTruncatedAnswer(stripped, true);
 }

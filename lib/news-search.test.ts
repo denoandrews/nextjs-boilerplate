@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { answerSegments, approvedNewspaperUrl, approvedOfficialUrl, cleanCitedText, closeTruncatedAnswer, externalLinkProps, extractCitedAnswer, newspaperDomains, presentAnswer, restorePeriodsAtFileCitations, splitNewsReferences } from "./news-search";
+import { answerSegments, approvedNewspaperUrl, approvedOfficialUrl, citationLineBodyIsUsable, cleanCitedText, closeTruncatedAnswer, externalLinkProps, extractCitedAnswer, newspaperDomains, omitInvalidCitationLines, presentAnswer, restorePeriodsAtFileCitations, splitNewsReferences } from "./news-search";
 import { matchWebUrl, sanitizeUrlText } from "./web-sources";
 
 function response(text: string, annotations: unknown[]) {
@@ -17,6 +17,9 @@ describe("Oak Park newspaper search", () => {
       expect(approvedNewspaperUrl(url)).toBeNull();
     }
     expect(approvedNewspaperUrl("https://www.oakpark.com/news/")).toBe("https://www.oakpark.com/news/");
+    expect(approvedNewspaperUrl("https://www.oakpark.com/story?utm_source=openai&utm_medium=web")).toBe("https://www.oakpark.com/story");
+    expect(approvedNewspaperUrl("https://oak-park.legistar.com/LegislationDetail.aspx?ID=1&utm_source=openai")).toBeNull();
+    expect(matchWebUrl("https://oak-park.legistar.com/LegislationDetail.aspx?ID=1&utm_source=openai")?.url).toBe("https://oak-park.legistar.com/LegislationDetail.aspx?ID=1");
     expect(approvedNewspaperUrl("https://www.chicagotribune.com/story/")).toBeTruthy();
     expect(approvedNewspaperUrl("https://www.oak-park.us/Government")).toBeNull();
     expect(approvedOfficialUrl("https://www.oak-park.us/Government/Leadership/Village-Board")).toBe("https://www.oak-park.us/Government/Leadership/Village-Board");
@@ -123,6 +126,12 @@ describe("Oak Park newspaper search", () => {
     expect(closeTruncatedAnswer("La ordenanza evita el escurrimiento", true)).toContain("se cortó");
     expect(presentAnswer("Overnight parking ends at 6 a.m.\n\nWhat I couldn't find", false)).toBe("Overnight parking ends at 6 a.m.");
     expect(presentAnswer("Overnight parking ends at 6 a.m.\n\nWhat I couldn't find", true)).toContain("cut off");
+    expect(citationLineBodyIsUsable("* list a specific pickup day.")).toBe(false);
+    expect(citationLineBodyIsUsable("")).toBe(false);
+    expect(citationLineBodyIsUsable("The village drew on budget reserves.")).toBe(true);
+    expect(omitInvalidCitationLines("The budget grew.\n\nThe Wednesday Journal reported: * list a specific pickup day.\n\nThe Chicago Tribune reported:\n\nThe fee changed.")).toBe("The budget grew.\n\nThe fee changed.");
+    expect(presentAnswer("The budget grew.\n\nThe Wednesday Journal reported: * list a specific pickup day.", false)).toBe("The budget grew.");
+    expect(presentAnswer("The Wednesday Journal reported: The village drew on budget reserves.", false)).toContain("budget reserves");
     expect(sanitizeUrlText("https://www.oakpark.com/story%60")).toBe("https://www.oakpark.com/story");
     expect(matchWebUrl("https://www.oak-park.us/budget`")?.url).toBe("https://www.oak-park.us/budget");
     expect(matchWebUrl("https://www.oakpark.com/2024/budget%60")?.kind).toBe("newspaper");

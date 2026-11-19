@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   alignCitations,
-  citeRetrievedNews,
   draftResearchQueries,
+  filterNewsEvidence,
+  formatEvidence,
   mergeEvidence,
   missingPartQueries,
+  newsEvidenceIsRelevant,
   parsePlannerQueries,
   personName,
   recencyCutoff,
@@ -147,16 +149,104 @@ describe("web evidence", () => {
     expect(merged.map((entry) => entry.kind)).toEqual(["record", "official", "newspaper"]);
     const aligned = alignCitations("The board voted. [2] Then the minutes. [3]", merged);
     expect(aligned.answer).toBe("The board voted. [1] Then the minutes. [2]");
+    expect(aligned.answer).not.toContain("Wednesday Journal reported");
     expect(aligned.citations.map((citation) => citation.marker)).toEqual(["[1]", "[2]"]);
     expect(aligned.citations.map((citation) => citation.fileId)).toEqual([
       "https://www.oak-park.us/board",
       "https://www.oakpark.com/story",
     ]);
-    const withNews = citeRetrievedNews("The budget grew. [1]", merged, [
-      { fileId: "file-minutes", filename: "minutes.pdf", marker: "[1]" },
+  });
+
+  it("keeps a newspaper hit only when it overlaps the question's street, person, or topic", () => {
+    const lake = "What did the board decide about the Lake Street streetscape, how much did it cost, who was the contractor, and were there any change orders?";
+    expect(newsEvidenceIsRelevant(lake, "The Percy Julian streetscape is underway on Oak Park Avenue.")).toBe(false);
+    expect(newsEvidenceIsRelevant(lake, "Another Oak Park Ave streetscape update.")).toBe(false);
+    expect(newsEvidenceIsRelevant(lake, "The Lake Street streetscape contract changed.")).toBe(true);
+    expect(newsEvidenceIsRelevant(lake, "Merchants on Lake St. asked for a schedule.")).toBe(true);
+    const budget = "How has the village budget changed over the last three years?";
+    expect(newsEvidenceIsRelevant(budget, "Wednesday Journal: the village drew on budget reserves to close the gap.")).toBe(true);
+    expect(newsEvidenceIsRelevant(budget, "The Percy Julian streetscape opens Saturday.")).toBe(false);
+    expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "Wednesday Journal profile of Milstein.")).toBe(true);
+    expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "A page about water bills and parking permits.")).toBe(false);
+
+    const reserves = item({
+      id: "https://www.oakpark.com/reserves?utm_source=openai",
+      kind: "newspaper",
+      filename: "Wednesday Journal",
+      url: "https://www.oakpark.com/reserves?utm_source=openai",
+      text: "The village drew on budget reserves to close the gap.",
+      score: 0.8,
+    });
+    const otherStreet = item({
+      id: "https://www.oakpark.com/percy",
+      kind: "newspaper",
+      filename: "Wednesday Journal",
+      url: "https://www.oakpark.com/percy",
+      text: "The Percy Julian streetscape is underway on Oak Park Avenue.",
+      score: 0.9,
+    });
+    const record = item({
+      id: "file-budget",
+      kind: "record",
+      filename: "fy26-budget-book.pdf",
+      text: "The FY2026 budget book compares spending.",
+      score: 0.7,
+    });
+    const budgetEvidence = filterNewsEvidence(budget, [otherStreet, reserves, record]);
+    expect(budgetEvidence.map((entry) => entry.id)).toEqual([
+      "https://www.oakpark.com/reserves?utm_source=openai",
+      "file-budget",
     ]);
-    expect(withNews.answer).toContain("Wednesday Journal reported");
-    expect(withNews.citations.some((citation) => citation.url === "https://www.oakpark.com/story")).toBe(true);
-    expect(withNews.answer).toContain(`[${withNews.citations.length}]`);
+    const budgetPrompt = formatEvidence(budgetEvidence, budget);
+    expect(budgetPrompt).toContain("budget reserves");
+    expect(budgetPrompt).toContain("https://www.oakpark.com/reserves");
+    expect(budgetPrompt).not.toContain("utm_source");
+    expect(budgetPrompt).toContain("Integrate each relevant newspaper finding into the answer prose");
+    expect(budgetPrompt).toContain("cite both");
+    expect(budgetPrompt).not.toContain("Percy Julian");
+
+    const lakeEvidence = filterNewsEvidence(lake, [otherStreet, item({
+      id: "https://www.oakpark.com/lake",
+      kind: "newspaper",
+      filename: "Wednesday Journal",
+      url: "https://www.oakpark.com/lake",
+      text: "The Lake Street streetscape contract was awarded.",
+      score: 0.8,
+    })]);
+    expect(lakeEvidence.map((entry) => entry.text)).toEqual(["The Lake Street streetscape contract was awarded."]);
+  });
+
+  it("requires a who-is answer to use newspaper results that name the person", () => {
+    const question = "Who is Robert Milstein?";
+    const kept = filterNewsEvidence(question, [
+      item({
+        id: "https://www.oakpark.com/market",
+        kind: "newspaper",
+        filename: "Wednesday Journal",
+        url: "https://www.oakpark.com/market",
+        text: "The farmers market opens on Saturday.",
+        score: 0.4,
+      }),
+      item({
+        id: "https://www.oakpark.com/milstein?utm_source=openai",
+        kind: "newspaper",
+        filename: "Wednesday Journal",
+        title: "Robert Milstein",
+        url: "https://www.oakpark.com/milstein?utm_source=openai",
+        text: "A Wednesday Journal profile of Robert Milstein.",
+        score: 0.8,
+      }),
+    ]);
+    expect(kept).toHaveLength(1);
+    const prompt = formatEvidence(kept, question);
+    expect(prompt).toContain("You must use every newspaper result that mentions Robert Milstein ([1])");
+    expect(prompt).toContain("https://www.oakpark.com/milstein");
+    expect(prompt).not.toContain("utm_source");
+    const aligned = alignCitations(
+      "Robert Milstein served as a trustee. [1]\n\nThe Wednesday Journal reported: * list a specific pickup day. [2]\n\nThe Chicago Tribune reported:",
+      kept,
+    );
+    expect(aligned.answer).toBe("Robert Milstein served as a trustee. [1]");
+    expect(aligned.citations.map((citation) => citation.url)).toEqual(["https://www.oakpark.com/milstein"]);
   });
 });
