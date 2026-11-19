@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  citationsFromEvidence,
+  alignCitations,
   draftResearchQueries,
   mergeEvidence,
+  missingPartQueries,
   parsePlannerQueries,
   personName,
   recencyCutoff,
@@ -58,7 +59,23 @@ describe("research queries", () => {
     );
     expect(lake.some((query) => /construction contractor/i.test(query))).toBe(true);
     expect(recencyCutoff("What is the history of the Roosevelt Road TIF?", NOW)).toBeNull();
-    expect(recencyCutoff("What is the current overnight parking policy?", NOW)).toBe(20241119);
+    expect(recencyCutoff("What is the current overnight parking policy?", NOW)).toBe(20231119);
+    expect(draftResearchQueries("[TEST] Who is Robert Milstein?", NOW)[0]).toBe("Robert Milstein trustee");
+    const gaps = missingPartQueries(
+      "What did the board decide about the Lake Street streetscape, who was the contractor?",
+      "Thomas Engineering Group handled the design.",
+    );
+    expect(gaps.some((query) => /construction contractor/i.test(query))).toBe(true);
+    expect(missingPartQueries(
+      "who was the contractor?",
+      "The construction contract was awarded to R.W. Duntemann Co.",
+    )).toEqual([]);
+    const parkingGaps = missingPartQueries(
+      "What is the current overnight parking policy?",
+      "Overnight parking is banned from 2:30 a.m. to 6:00 a.m. unless a permit is used.",
+    );
+    expect(parkingGaps.join(" ")).toContain("ORD 23-118");
+    expect(parkingGaps.join(" ")).toContain("ORD 24-124");
   });
 
   it("reads planner JSON and ignores anything that is not a query list", () => {
@@ -71,7 +88,9 @@ describe("web evidence", () => {
   it("keeps the official site and newspapers on for Oak Park and lets an env flag turn them off", () => {
     expect(webSearchDomains("oak-park-il")).toEqual([
       "oakpark.com",
+      "www.oakpark.com",
       "chicagotribune.com",
+      "www.chicagotribune.com",
       "oak-park.us",
       "www.oak-park.us",
       "oak-park.legistar.com",
@@ -91,6 +110,8 @@ describe("web evidence", () => {
     expect(webResultIsRelevant(parking, "The overnight parking permit fee changed for 2024 permits.")).toBe(true);
     expect(webResultIsRelevant("Who is Robert Milstein?", "A page about water bills and parking permits.")).toBe(false);
     expect(webResultIsRelevant("Who is Robert Milstein?", "Board listing for Robert Milstein.")).toBe(true);
+    expect(webResultIsRelevant("[TEST] Who is Robert Milstein?", "Wednesday Journal profile of Milstein.")).toBe(true);
+    expect(webResultIsRelevant("What is the current overnight parking policy?", "www.oakpark.com reported a parking fee change.")).toBe(true);
   });
 
   it("ranks official records and the official website above newspaper reporting", () => {
@@ -121,8 +142,12 @@ describe("web evidence", () => {
       }),
     ]);
     expect(merged.map((entry) => entry.kind)).toEqual(["record", "official", "newspaper"]);
-    const citations = citationsFromEvidence("The board voted. [2]", merged);
-    expect(citations.map((citation) => citation.fileId)).toEqual(["https://www.oak-park.us/board"]);
-    expect(citations[0].marker).toBe("[Official 2]");
+    const aligned = alignCitations("The board voted. [2] Then the minutes. [3]", merged);
+    expect(aligned.answer).toBe("The board voted. [1] Then the minutes. [2]");
+    expect(aligned.citations.map((citation) => citation.marker)).toEqual(["[1]", "[2]"]);
+    expect(aligned.citations.map((citation) => citation.fileId)).toEqual([
+      "https://www.oak-park.us/board",
+      "https://www.oakpark.com/story",
+    ]);
   });
 });

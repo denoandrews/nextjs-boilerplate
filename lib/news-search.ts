@@ -241,7 +241,7 @@ export function extractCitedAnswer(
 export function splitNewsReferences(text: string, citations: ChatCitation[] = []) {
   const links = new Map(citations.filter((citation) => citation.marker && citation.url && (approvedNewspaperUrl(citation.url) || approvedOfficialUrl(citation.url)))
     .map((citation) => [citation.marker!, citation]));
-  return text.split(/(\[(?:News|Official) \d+\])/g).filter(Boolean).map((part) => ({ text: part, citation: links.get(part) }));
+  return text.split(/(\[(?:News|Official) \d+\]|\[\d+\])/g).filter(Boolean).map((part) => ({ text: part, citation: links.get(part) }));
 }
 
 export type AnswerSegment = { text: string; href?: string };

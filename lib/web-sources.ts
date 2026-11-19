@@ -19,7 +19,9 @@ export type WebSource = {
 const MUNICIPAL_WEB_SOURCES: Record<string, WebSource[]> = {
   "oak-park-il": [
     { domain: "oakpark.com", kind: "newspaper", label: "Wednesday Journal" },
+    { domain: "www.oakpark.com", kind: "newspaper", label: "Wednesday Journal" },
     { domain: "chicagotribune.com", kind: "newspaper", label: "Chicago Tribune" },
+    { domain: "www.chicagotribune.com", kind: "newspaper", label: "Chicago Tribune" },
     { domain: "oak-park.us", kind: "official", label: "Village of Oak Park" },
     { domain: "www.oak-park.us", kind: "official", label: "Village of Oak Park" },
     { domain: "oak-park.legistar.com", kind: "official", label: "Oak Park Legistar" },

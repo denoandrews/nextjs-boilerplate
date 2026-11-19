@@ -97,12 +97,11 @@ describe("research mode", () => {
     expect(body.newsSearched).toBe(true);
     const bodies = mocks.create.mock.calls.map((call) => call[0]);
     const webCalls = bodies.filter((call) => callKind(call) === "web");
-    expect(webCalls).toHaveLength(2);
-    const domainSets = webCalls.map((call) => (call.tools[0].filters.allowed_domains as string[]).slice().sort().join("|")).sort();
-    expect(domainSets).toEqual([
-      ["chicagotribune.com", "oakpark.com"].sort().join("|"),
-      ["oak-park.legistar.com", "oak-park.us", "www.oak-park.us"].sort().join("|"),
-    ]);
+    expect(webCalls.length).toBeGreaterThanOrEqual(2);
+    const domainSets = webCalls.map((call) => (call.tools[0].filters.allowed_domains as string[]).slice().sort().join("|"));
+    expect(domainSets).toContain(["chicagotribune.com", "oakpark.com", "www.chicagotribune.com", "www.oakpark.com"].sort().join("|"));
+    expect(domainSets).toContain(["oak-park.legistar.com", "oak-park.us", "www.oak-park.us"].sort().join("|"));
+    expect(domainSets).toContain("oak-park.legistar.com");
     expect(mocks.search.mock.calls.length).toBeGreaterThan(2);
   });
 
@@ -198,7 +197,35 @@ describe("research mode", () => {
     expect(mocks.create).toHaveBeenCalledTimes(1);
     expect(mocks.search.mock.calls.some((call) => call[1]?.rewrite_query === false)).toBe(false);
     const domains = mocks.create.mock.calls[0][0].tools.find((tool: { type?: string }) => tool.type === "web_search").filters.allowed_domains;
-    expect(domains).toEqual(["oakpark.com", "chicagotribune.com"]);
+    expect(domains).toEqual(["oakpark.com", "www.oakpark.com", "chicagotribune.com", "www.chicagotribune.com"]);
     expect(domains).not.toContain("oak-park.us");
+  });
+
+  it("retries a timed-out newspaper search once and does not mark that pass as searched", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-only");
+    mocks.config.mockResolvedValue(OAK);
+    mocks.search.mockResolvedValue({ data: [] });
+    let newsAttempts = 0;
+    mocks.create.mockImplementation(async (body: { tools?: { type?: string; filters?: { allowed_domains?: string[] } }[]; instructions?: string }) => {
+      const kind = callKind(body);
+      if (kind === "plan") return textResponse('{"queries":["budget"]}');
+      if (kind === "web") {
+        const domains = body.tools?.[0]?.filters?.allowed_domains ?? [];
+        if (domains.includes("oakpark.com")) {
+          newsAttempts += 1;
+          throw Object.assign(new Error("timed out"), { name: "APIConnectionTimeoutError" });
+        }
+        return textResponse("Village budget page.", [
+          { type: "url_citation", url: "https://www.oak-park.us/budget", title: "Budget", start_index: 0, end_index: 18 },
+        ]);
+      }
+      return textResponse("The budget grew. [1]");
+    });
+    const response = await POST(request("How has the village budget changed over the last three years?"));
+    const body = await response.json();
+    expect(newsAttempts).toBe(2);
+    expect(body.newsSearched).toBe(false);
+    expect(body.officialSearched).toBe(true);
+    expect(body.answer).toContain("budget");
   });
 });

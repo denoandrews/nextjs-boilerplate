@@ -5,7 +5,7 @@ import { resolveChatModel } from "@/lib/chat-model";
 import { buildChatInstructions, getMaxOutputTokens, getRetryOutputTokens } from "@/lib/chat-instructions";
 import { logChatDiagnostics } from "@/lib/chat-diagnostics";
 import { fileSearchFilters, fileSearchTool, loadAttributeIndex } from "@/lib/file-search";
-import { researchModeEnabled, runResearchTurn } from "@/lib/research";
+import { researchModeEnabled, runResearchTurn, stripHarnessPrefix } from "@/lib/research";
 import { webPassEnabled, webSearchDomains } from "@/lib/web-sources";
 import { turnLanguageDirective } from "@/lib/ui-locale";
 import { OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT_MS, requestTimedOut } from "@/lib/chat-request";
@@ -118,13 +118,14 @@ export async function POST(req: Request) {
 
   try {
     const body = (await req.json().catch(() => ({}))) as ChatRequest;
-    const message = typeof body.message === "string" ? body.message.trim() : "";
+    const rawMessage = typeof body.message === "string" ? body.message.trim() : "";
+    const message = stripHarnessPrefix(rawMessage);
 
-    if (!message) {
+    if (!rawMessage || !message) {
       return jsonResponse({ error: "Type a question and press Send.", requestId }, 400, requestId);
     }
 
-    if (message.length > MAX_MESSAGE_LENGTH) {
+    if (rawMessage.length > MAX_MESSAGE_LENGTH) {
       return jsonResponse(
         {
           error: `Questions must be ${MAX_MESSAGE_LENGTH.toLocaleString()} characters or fewer.`,
@@ -211,6 +212,17 @@ export async function POST(req: Request) {
         result.citations.map((citation) => citation.fileId),
       );
       const citations = withStoredSourceUrls(result.citations, storedUrls);
+      console.info(`[${requestId}] chat usage ${JSON.stringify({
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        reasoningTokens: result.usage.reasoningTokens ?? 0,
+        totalTokens: result.usage.totalTokens,
+        fileSearchCalls: result.usage.fileSearchCalls,
+        webSearchCalls: result.usage.webSearchCalls ?? 0,
+        estimatedCostMicrousd: result.usage.estimatedCostMicrousd,
+        newsSearched: result.newsSearched,
+        officialSearched: result.officialSearched,
+      })}`);
       await logUsageEvent({
         municipalityId: municipality.id,
         requestId,

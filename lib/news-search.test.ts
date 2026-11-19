@@ -6,8 +6,8 @@ function response(text: string, annotations: unknown[]) {
 }
 
 describe("Oak Park newspaper search", () => {
-  it("enables only the Oak Park tenant's two approved newspapers", () => {
-    expect(newspaperDomains("oak-park-il")).toEqual(["oakpark.com", "chicagotribune.com"]);
+  it("enables the Oak Park newspapers, including the www hosts", () => {
+    expect(newspaperDomains("oak-park-il")).toEqual(["oakpark.com", "www.oakpark.com", "chicagotribune.com", "www.chicagotribune.com"]);
     expect(newspaperDomains("strawberry-point-ia")).toEqual([]);
     expect(newspaperDomains("default")).toEqual([]);
   });

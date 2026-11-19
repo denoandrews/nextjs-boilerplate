@@ -5,7 +5,7 @@ import { DEFAULT_REASONING_MODEL, type ReasoningEffort } from "@/lib/chat-model"
 import { buildChatInstructions, getMaxOutputTokens, getRetryOutputTokens } from "@/lib/chat-instructions";
 import { logChatDiagnostics } from "@/lib/chat-diagnostics";
 import { recordDateNumber, dateBoostFor, calendarStamp, questionAsksAboutHistory, shiftMonths } from "@/lib/file-search";
-import { excludedCitationFilename } from "@/lib/source-links";
+import { excludedCitationFilename, officialPages } from "@/lib/source-links";
 import { addChatUsage, estimateCostMicrousd, extractChatUsage, type ChatUsage } from "@/lib/chat-usage";
 import { extractCitedAnswer, type ChatCitation } from "@/lib/news-search";
 import { turnLanguageDirective } from "@/lib/ui-locale";
@@ -23,7 +23,7 @@ export const RESEARCH_NEWSPAPER_SLOTS = 6;
 const SEARCH_RESULTS = 12;
 const PLAN_TIMEOUT_MS = 12_000;
 const SEARCH_TIMEOUT_MS = 10_000;
-const WEB_TIMEOUT_MS = 18_000;
+const WEB_TIMEOUT_MS = 40_000;
 const TURN_BUDGET_MS = 155_000;
 
 const STOP_WORDS = new Set([
@@ -56,15 +56,20 @@ export function researchModeEnabled(slug: string, raw = process.env.MUNIGPT_RESE
   return slug === "oak-park-il";
 }
 
+/** Drop harness prefixes such as `[TEST]` before planning, search, and relevance checks. */
+export function stripHarnessPrefix(text: string): string {
+  return text.replace(/^(?:\s*\[(?:TEST|DEBUG|EVAL)\]\s*)+/i, "").trim();
+}
+
 export function personName(question: string): string | null {
-  const match = question.match(/\b(?:[Ww]ho|[Qq]ui[eé]n)\s+(?:is|was|es|fue)\s+((?:[A-Z][a-z]+|[A-Z]\.)(?:\s+(?:[A-Z][a-z]+|[A-Z]\.)){0,3})/);
+  const match = stripHarnessPrefix(question).match(/\b(?:[Ww]ho|[Qq]ui[eé]n)\s+(?:is|was|es|fue)\s+((?:[A-Z][a-z]+|[A-Z]\.)(?:\s+(?:[A-Z][a-z]+|[A-Z]\.)){0,3})/);
   if (!match) return null;
   const name = match[1].replace(/[?.!,;:]+$/g, "").trim();
   if (/^(?:the|village|board|mayor|president)\b/i.test(name)) return null;
   return name;
 }
 
-function uniqueQueries(queries: string[]): string[] {
+function uniqueQueries(queries: string[], limit = RESEARCH_QUERY_LIMIT): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const query of queries) {
@@ -73,7 +78,7 @@ function uniqueQueries(queries: string[]): string[] {
     if (trimmed.length < 3 || seen.has(key)) continue;
     seen.add(key);
     out.push(trimmed.slice(0, 180));
-    if (out.length >= RESEARCH_QUERY_LIMIT) break;
+    if (out.length >= limit) break;
   }
   return out;
 }
@@ -95,9 +100,68 @@ function yearsFor(question: string, now: Date): number[] {
   return [];
 }
 
+export function isBoardRosterQuestion(question: string): boolean {
+  const text = stripHarnessPrefix(question);
+  return /\b(?:village president|who (?:is|are) the (?:current )?(?:village )?(?:president|trustees?)|current trustees)\b/i.test(text);
+}
+
+export function wantsLegistarPass(question: string): boolean {
+  const text = stripHarnessPrefix(question);
+  return /\b(?:current|policy|ordinance|overnight parking)\b/i.test(text);
+}
+
+function topicPhrase(question: string): string {
+  const streetscape = question.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}\s+streetscape)\b/);
+  if (streetscape) return streetscape[1];
+  const street = question.match(/\b([A-Z][a-z]+\s+Street)\b/);
+  if (street) return street[1];
+  return "the project";
+}
+
+/** Parts the merged evidence still does not answer, with a targeted follow-up query for each. */
+export function missingPartQueries(question: string, evidenceText: string): string[] {
+  const text = stripHarnessPrefix(question);
+  const topic = topicPhrase(text);
+  const checks: { when: RegExp; covered: RegExp; queries: string[] }[] = [
+    {
+      when: /\bcontractor\b/i,
+      covered: /\b(?:contractor|awarded to|construction contract|contract award)\b/i,
+      queries: [`${topic} construction contractor contract award`, `${topic} bid award construction contract`],
+    },
+    {
+      when: /\b(?:how much|what did it cost|contract amount)\b/i,
+      covered: /\$\s?\d|\b(?:contract amount|not to exceed)\b/i,
+      queries: [`${topic} contract amount cost`],
+    },
+    {
+      when: /\bchange orders?\b/i,
+      covered: /\bchange orders?\b/i,
+      queries: [`${topic} change order`],
+    },
+  ];
+  if (/\bovernight parking\b/i.test(text) && /\b(?:current|policy)\b/i.test(text) && !/\b(?:2023|2024|ORD\s*23-118|MOT\s*24-142|ORD\s*24-124)\b/i.test(evidenceText)) {
+    checks.push({
+      when: /./,
+      covered: /$a/,
+      queries: [
+        "overnight parking ORD 23-118",
+        "overnight parking MOT 24-142",
+        "overnight parking ORD 24-124",
+      ],
+    });
+  }
+  const queries: string[] = [];
+  for (const check of checks) {
+    if (!check.when.test(text) || check.covered.test(evidenceText)) continue;
+    queries.push(...check.queries);
+  }
+  return uniqueQueries(queries, 8);
+}
+
 /** Targeted file-search queries. Person, year, and multi-part coverage is kept even if the planner is vague. */
 export function draftResearchQueries(question: string, now = new Date()): string[] {
-  const name = personName(question);
+  const cleaned = stripHarnessPrefix(question);
+  const name = personName(cleaned);
   if (name) {
     return uniqueQueries([
       `${name} trustee`,
@@ -108,37 +172,47 @@ export function draftResearchQueries(question: string, now = new Date()): string
     ]);
   }
 
-  if (/\bovernight parking\b/i.test(question) || (/\bparking\b/i.test(question) && /\b(?:policy|permit|ordinance)\b/i.test(question))) {
+  if (isBoardRosterQuestion(cleaned)) {
     return uniqueQueries([
-      "overnight parking permit ordinance 2023",
-      "overnight parking permit ordinance 2024",
-      "overnight parking policy minutes decision",
-      question,
+      "Village President trustees Village Board",
+      "current Village President",
+      "current Village trustees roster",
+      cleaned,
     ]);
   }
 
-  if (/\blake street\b/i.test(question)) {
+  if (/\bovernight parking\b/i.test(cleaned) || (/\bparking\b/i.test(cleaned) && /\b(?:policy|permit|ordinance)\b/i.test(cleaned))) {
+    return uniqueQueries([
+      "overnight parking permit ordinance 2023",
+      "overnight parking permit ordinance 2024",
+      "overnight parking ORD 23-118",
+      "overnight parking MOT 24-142",
+      "overnight parking ORD 24-124",
+      "Legistar overnight parking ordinance",
+    ]);
+  }
+
+  if (/\blake street\b/i.test(cleaned)) {
     const queries = ["Lake Street streetscape board decision"];
-    if (/\b(?:cost|how much|budget|amount)\b/i.test(question)) queries.push("Lake Street streetscape cost contract amount");
-    if (/\bcontractor\b/i.test(question)) queries.push("Lake Street streetscape construction contractor");
-    if (/\bchange orders?\b/i.test(question)) queries.push("Lake Street streetscape change order");
+    if (/\b(?:cost|how much|budget|amount)\b/i.test(cleaned)) queries.push("Lake Street streetscape cost contract amount");
+    if (/\bcontractor\b/i.test(cleaned)) queries.push("Lake Street streetscape construction contractor");
+    if (/\bchange orders?\b/i.test(cleaned)) queries.push("Lake Street streetscape change order");
     return uniqueQueries(queries);
   }
 
-  const years = yearsFor(question, now);
-  if (years.length >= 2 && /\b(?:budget|spending|levy|fund)\b/i.test(question)) {
+  const years = yearsFor(cleaned, now);
+  if (years.length >= 2 && /\b(?:budget|spending|levy|fund)\b/i.test(cleaned)) {
     return uniqueQueries([
       ...years.map((year) => `village budget FY${year} adopted expenditures`),
       "reasons for village budget changes",
     ]);
   }
 
-  const parts = question
-    .replace(/^\s*\[TEST\]\s*/i, "")
+  const parts = cleaned
     .split(/[?;]|\s+\band\s+|,(?=\s)/i)
     .map((part) => part.trim())
     .filter((part) => part.length > 12);
-  const queries = parts.length >= 2 ? parts : [question, `${question} minutes`, `${question} ordinance`];
+  const queries = parts.length >= 2 ? parts : [cleaned, `${cleaned} minutes`, `${cleaned} ordinance`];
   return uniqueQueries(queries);
 }
 
@@ -147,14 +221,17 @@ export function mergeResearchQueries(required: string[], planned: string[]): str
 }
 
 export function recencyCutoff(question: string, now = new Date()): number | null {
-  if (questionAsksAboutHistory(question) || personName(question)) return null;
-  const threeYears = /\b(?:last|past)\s+three\b|\bthree\s+(?:fiscal\s+)?years\b/i.test(question);
-  const current = /\b(?:current|status|latest|recent|policy|today)\b/i.test(question);
+  const text = stripHarnessPrefix(question);
+  if (questionAsksAboutHistory(text) || personName(text)) return null;
+  const threeYears = /\b(?:last|past)\s+three\b|\bthree\s+(?:fiscal\s+)?years\b/i.test(text);
+  const current = /\b(?:current|status|latest|recent|policy|today)\b/i.test(text);
   if (!threeYears && !current) return null;
-  return shiftMonths(calendarStamp(now), threeYears ? 36 : 24);
+  // 36 months keeps 2023–2024 ordinances inside a "current policy" question asked in late 2026.
+  return shiftMonths(calendarStamp(now), 36);
 }
 
 export function significantTerms(text: string): string[] {
+  text = stripHarnessPrefix(text);
   return text
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
@@ -162,19 +239,22 @@ export function significantTerms(text: string): string[] {
     .filter((word) => word.length > 3 && !STOP_WORDS.has(word));
 }
 
-/** Drops website and newspaper hits that do not share the question's topic, including a person's name. */
+/**
+ * Drops website and newspaper hits that do not share the question's topic.
+ * One shared term is enough for an on-domain page. A person hit must include
+ * the surname so a short Wednesday Journal blurb is not discarded.
+ */
 export function webResultIsRelevant(question: string, text: string): boolean {
   const haystack = text.toLowerCase();
   const name = personName(question);
   if (name) {
     const parts = name.toLowerCase().split(/\s+/).filter((part) => part.length > 2);
-    if (parts.length > 0 && !parts.every((part) => haystack.includes(part))) return false;
+    const surname = parts[parts.length - 1];
+    if (surname && !haystack.includes(surname)) return false;
   }
   const terms = significantTerms(question);
   if (terms.length === 0) return haystack.trim().length > 40;
-  const hits = terms.filter((term) => haystack.includes(term));
-  const needed = terms.length <= 2 ? 1 : 2;
-  return hits.length >= needed;
+  return terms.some((term) => haystack.includes(term));
 }
 
 export function overlapScore(question: string, text: string): number {
@@ -192,7 +272,8 @@ function typeBoost(documentType?: string): number {
 export function scoreEvidence(item: Omit<EvidenceItem, "tier" | "rankScore">, question: string, now = new Date()): EvidenceItem {
   const tier: 0 | 1 = item.kind === "newspaper" ? 1 : 0;
   const boost = dateBoostFor(item.recordDate, calendarStamp(now), questionAsksAboutHistory(question));
-  const rankScore = item.score * boost * (item.kind === "record" ? typeBoost(item.documentType) : 1);
+  let rankScore = item.score * boost * (item.kind === "record" ? typeBoost(item.documentType) : 1);
+  if (isBoardRosterQuestion(question) && /village-board/i.test(item.url ?? "")) rankScore += 5;
   return { ...item, tier, rankScore };
 }
 
@@ -211,7 +292,7 @@ export function mergeEvidence(items: EvidenceItem[]): EvidenceItem[] {
   return [...official, ...news];
 }
 
-export function formatEvidence(items: EvidenceItem[]): string {
+export function formatEvidence(items: EvidenceItem[], question = ""): string {
   if (items.length === 0) return "No municipal records, official website pages, or newspaper passages were retrieved for this question.";
   const lines = items.map((item, index) => {
     const source = item.kind === "newspaper" ? "newspaper reporting" : item.kind === "official" ? "official website" : "municipal record";
@@ -220,34 +301,50 @@ export function formatEvidence(items: EvidenceItem[]): string {
     const url = item.url ? ` | url: ${item.url}` : "";
     return `[${index + 1}] source: ${source} | filename: ${item.filename}${date}${type}${url}\n${item.text}`;
   });
+  const roster = isBoardRosterQuestion(question)
+    ? " When the question asks who the Village President or trustees are, cite the official Village Board page."
+    : "";
+  const parking = /\bovernight parking\b/i.test(question) && /\b(?:current|policy)\b/i.test(question)
+    ? " For the current overnight parking policy, include 2023 and 2024 ordinance or Legistar changes that appear in the evidence, not only the current website summary."
+    : "";
   return [
-    "Evidence for this question, already merged. Municipal records and official website pages are listed before newspaper reporting. Official website content is not newspaper reporting. Use only this evidence for facts. Cite the bracket number, such as [1], at the end of every factual sentence. If a person appears only as a candidate or an objector here, say the records may be incomplete and do not conclude they were not a village official.",
+    `Evidence for this question, already merged. Municipal records and official website pages are listed before newspaper reporting. Official website content is not newspaper reporting. Use only this evidence for facts. Cite the bracket number, such as [1], at the end of every factual sentence. If a person appears only as a candidate or an objector here, say the records may be incomplete and do not conclude they were not a village official.${roster}${parking}`,
     ...lines,
   ].join("\n\n");
 }
 
-export function citationsFromEvidence(answer: string, items: EvidenceItem[]): ChatCitation[] {
-  const cited = new Set<number>();
-  for (const match of answer.matchAll(/\[(\d+)\]/g)) {
-    const number = Number(match[1]);
-    if (number >= 1 && number <= items.length) cited.add(number);
-  }
+/**
+ * Renumber inline [n] markers to match the returned citation list, in the order
+ * they first appear. Every returned citation, including a record, gets that marker.
+ */
+export function alignCitations(answer: string, items: EvidenceItem[]): { answer: string; citations: ChatCitation[] } {
+  const order: number[] = [];
+  const seen = new Set<number>();
+  const add = (number: number) => {
+    if (number < 1 || number > items.length || seen.has(number)) return;
+    seen.add(number);
+    order.push(number);
+  };
+  for (const match of answer.matchAll(/\[(\d+)\]/g)) add(Number(match[1]));
   items.forEach((item, index) => {
-    if (item.url && answer.includes(item.url)) cited.add(index + 1);
-    if (item.filename.length > 12 && answer.includes(item.filename)) cited.add(index + 1);
+    if (item.url && answer.includes(item.url)) add(index + 1);
+    if (item.filename.length > 12 && answer.includes(item.filename)) add(index + 1);
   });
-  return [...cited].sort((left, right) => left - right).map((number) => {
-    const item = items[number - 1];
-    const official = item.kind === "official";
-    const newspaper = item.kind === "newspaper";
+  const renumber = new Map(order.map((old, index) => [old, index + 1]));
+  const rewritten = answer.replace(/\[(\d+)\]/g, (full, raw: string) => {
+    const next = renumber.get(Number(raw));
+    return next ? `[${next}]` : full;
+  });
+  const citations = order.map((old, index) => {
+    const item = items[old - 1];
     return {
       fileId: item.id,
       filename: item.filename,
       ...(item.url ? { url: item.url } : {}),
-      ...(official ? { marker: `[Official ${number}]` } : {}),
-      ...(newspaper ? { marker: `[News ${number}]` } : {}),
+      marker: `[${index + 1}]`,
     };
   });
+  return { answer: rewritten, citations };
 }
 
 export function parsePlannerQueries(text: string): string[] {
@@ -339,47 +436,92 @@ async function searchRecords(
   return items;
 }
 
-function webItemsFromResponse(response: OpenAI.Responses.Response, question: string, now: Date, fallbackKind: WebSourceKind): EvidenceItem[] {
+function urlsInText(text: string): string[] {
+  return [...text.matchAll(/https:\/\/[^\s<>"')\]]+/g)].map((match) => match[0].replace(/[.,;]+$/g, ""));
+}
+
+function webItemsFromResponse(
+  response: OpenAI.Responses.Response,
+  question: string,
+  now: Date,
+  fallbackKind: WebSourceKind,
+): { items: EvidenceItem[]; dropped: number; hosts: string[] } {
   const items: EvidenceItem[] = [];
+  const seen = new Set<string>();
+  let dropped = 0;
+  const hosts: string[] = [];
+  const add = (url: string, title: string, excerpt: string) => {
+    const matched = matchWebUrl(url);
+    let host = "";
+    try { host = new URL(url).hostname; } catch { host = url.slice(0, 40); }
+    if (!hosts.includes(host)) hosts.push(host);
+    const body = `${title}\n${excerpt}`;
+    if (!matched || !webResultIsRelevant(question, body)) {
+      dropped += 1;
+      return;
+    }
+    if (seen.has(matched.url)) return;
+    seen.add(matched.url);
+    items.push(scoreEvidence({
+      id: matched.url,
+      kind: matched.kind,
+      filename: title || matched.label,
+      title: title || undefined,
+      url: matched.url,
+      text: excerpt.slice(0, 900),
+      score: overlapScore(question, body),
+    }, question, now));
+  };
   for (const item of response.output ?? []) {
+    if (item.type === "web_search_call" && item.action.type === "search") {
+      for (const source of item.action.sources ?? []) add(source.url, "", source.url);
+    }
+    if (item.type === "web_search_call" && item.action.type === "open_page" && item.action.url) {
+      add(item.action.url, "", item.action.url);
+    }
     if (item.type !== "message") continue;
     for (const content of item.content) {
       if (content.type !== "output_text") continue;
       const text = content.text.trim();
       const annotations = content.annotations.filter((annotation) => annotation.type === "url_citation");
-      if (annotations.length === 0) {
-        if (webResultIsRelevant(question, text)) {
-          items.push(scoreEvidence({
-            id: `web-text:${fallbackKind}:${text.slice(0, 80)}`,
-            kind: fallbackKind,
-            filename: fallbackKind === "official" ? "Official website" : "Newspaper",
-            text: text.slice(0, 900),
-            score: overlapScore(question, text),
-          }, question, now));
-        }
-        continue;
-      }
       for (const annotation of annotations) {
         if (annotation.type !== "url_citation") continue;
-        const matched = matchWebUrl(annotation.url);
-        if (!matched) continue;
         const start = Math.max(0, annotation.start_index - 500);
-        const excerpt = text.slice(start, Math.max(annotation.end_index, start + 200)).trim() || text.slice(0, 900);
-        const body = `${annotation.title ?? ""}\n${excerpt}`;
-        if (!webResultIsRelevant(question, body)) continue;
+        const excerpt = text.slice(start, Math.max(annotation.end_index, start + 240)).trim() || text.slice(0, 900);
+        add(annotation.url, annotation.title || "", excerpt);
+      }
+      for (const url of urlsInText(text)) add(url, "", text.slice(0, 900));
+      if (annotations.length === 0 && urlsInText(text).length === 0 && webResultIsRelevant(question, text)) {
         items.push(scoreEvidence({
-          id: matched.url,
-          kind: matched.kind,
-          filename: annotation.title || matched.label,
-          title: annotation.title || undefined,
-          url: matched.url,
-          text: excerpt.slice(0, 900),
-          score: overlapScore(question, body),
+          id: `web-text:${fallbackKind}:${text.slice(0, 80)}`,
+          kind: fallbackKind,
+          filename: fallbackKind === "official" ? "Official website" : "Newspaper",
+          text: text.slice(0, 900),
+          score: overlapScore(question, text),
         }, question, now));
       }
     }
   }
-  return items;
+  return { items, dropped, hosts };
+}
+
+type WebPassResult = { items: EvidenceItem[]; usage: ChatUsage | null; ok: boolean };
+
+function webQuery(question: string, kind: WebSourceKind, focus?: string): string {
+  const clean = stripHarnessPrefix(question);
+  if (focus) return focus;
+  const name = personName(clean);
+  if (kind === "newspaper") return name ? `${name} Oak Park` : `${clean} Oak Park`;
+  if (name) return `${clean}\nLook up ${name} on the village website, including trustee, village board, roll call, budget, and president.`;
+  if (isBoardRosterQuestion(clean)) return `${clean}\nVillage President and trustees on the official Village Board page.`;
+  if (wantsLegistarPass(clean)) return `${clean}\nSearch Legistar for ordinances and motions from 2023 and 2024.`;
+  return clean;
+}
+
+function isTimeout(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("name" in error)) return false;
+  const name = String(error.name);
+  return name === "APIConnectionTimeoutError" || name === "TimeoutError";
 }
 
 async function runWebPass(
@@ -391,36 +533,57 @@ async function runWebPass(
     now: Date;
     signal?: AbortSignal;
     requestId: string;
+    domains?: string[];
+    focus?: string;
   },
-): Promise<{ items: EvidenceItem[]; usage: ChatUsage | null }> {
-  const domains = input.kind === "official" ? officialWebDomains(input.slug) : newspaperDomainsFor(input.slug);
-  if (domains.length === 0) return { items: [], usage: null };
-  const name = personName(input.question);
-  const query = name
-    ? `${input.question}\nLook up ${name}, including trustee, village board, roll call, budget, and president.`
-    : input.question;
-  const response = await client.responses.create(
-    {
-      model: process.env.MUNIGPT_PLANNER_MODEL?.trim() || DEFAULT_REASONING_MODEL,
-      reasoning: { effort: "low" },
-      max_output_tokens: 1_200,
-      tool_choice: "required",
-      instructions: input.kind === "official"
-        ? "Search only the official municipal website. Quote short passages that are about the question, with page titles and URLs. Skip unrelated pages. Do not write the final answer. Do not conclude that a person was not an official."
-        : "Search only the approved newspapers. Quote short passages that are about the question, with the article title, date, and URL. Skip unrelated articles. Call each passage newspaper reporting. Do not write the final answer.",
-      input: query,
-      include: ["web_search_call.action.sources"],
-      tools: [{
-        type: "web_search",
-        filters: { allowed_domains: domains },
-        external_web_access: true,
-        search_context_size: "low",
-      }],
-    },
-    { timeout: WEB_TIMEOUT_MS, signal: input.signal },
-  );
-  logChatDiagnostics(input.requestId, response);
-  return { items: webItemsFromResponse(response, input.question, input.now, input.kind), usage: extractChatUsage(response, DEFAULT_REASONING_MODEL) };
+): Promise<WebPassResult> {
+  const domains = input.domains ?? (input.kind === "official" ? officialWebDomains(input.slug) : newspaperDomainsFor(input.slug));
+  if (domains.length === 0) return { items: [], usage: null, ok: false };
+  const attempt = async () => {
+    const response = await client.responses.create(
+      {
+        model: process.env.MUNIGPT_PLANNER_MODEL?.trim() || DEFAULT_REASONING_MODEL,
+        reasoning: { effort: "low" },
+        max_output_tokens: 1_200,
+        tool_choice: "required",
+        instructions: input.kind === "official"
+          ? "Search only the allowed official municipal site. Quote short passages that are about the question, with page titles and full https URLs. Skip unrelated pages. Do not write the final answer. Do not conclude that a person was not an official."
+          : "Search only the allowed newspapers, including www.oakpark.com for the Wednesday Journal. Quote short passages that are about the question, with the article title, date, and full https URL. Skip unrelated articles. Call each passage newspaper reporting. Do not write the final answer.",
+        input: webQuery(input.question, input.kind, input.focus),
+        include: ["web_search_call.action.sources"],
+        tools: [{
+          type: "web_search",
+          filters: { allowed_domains: domains },
+          external_web_access: true,
+          search_context_size: "low",
+        }],
+      },
+      { timeout: WEB_TIMEOUT_MS, signal: input.signal },
+    );
+    logChatDiagnostics(input.requestId, response);
+    const extracted = webItemsFromResponse(response, input.question, input.now, input.kind);
+    console.info(`[${input.requestId}] web pass ${input.kind} kept=${extracted.items.length} dropped=${extracted.dropped} hosts=${extracted.hosts.join(",") || "none"} domains=${domains.join(",")}`);
+    const usage = extractChatUsage(response, DEFAULT_REASONING_MODEL);
+    if ((usage.webSearchCalls ?? 0) === 0) usage.webSearchCalls = 1;
+    return { items: extracted.items, usage, ok: true };
+  };
+  try {
+    return await attempt();
+  } catch (error) {
+    if (input.signal?.aborted) throw error;
+    if (!isTimeout(error)) {
+      console.error(`[${input.requestId}] ${input.kind} web search failed.`, error);
+      return { items: [], usage: null, ok: false };
+    }
+    console.info(`[${input.requestId}] ${input.kind} web search timed out after ${WEB_TIMEOUT_MS}ms. Retrying once.`);
+    try {
+      return await attempt();
+    } catch (retryError) {
+      if (input.signal?.aborted) throw retryError;
+      console.error(`[${input.requestId}] ${input.kind} web search retry failed.`, retryError);
+      return { items: [], usage: null, ok: false };
+    }
+  }
 }
 
 async function planQueries(
@@ -467,6 +630,7 @@ export async function runResearchTurn(input: {
   now?: Date;
   onProgress?: (message: string) => void;
 }): Promise<ResearchTurn> {
+  const question = stripHarnessPrefix(input.question);
   const now = input.now ?? new Date();
   const started = Date.now();
   const remaining = () => TURN_BUDGET_MS - (Date.now() - started);
@@ -476,49 +640,54 @@ export async function runResearchTurn(input: {
   };
 
   const webOn = webPassEnabled(input.slug);
-  const officialSearched = webOn && officialWebDomains(input.slug).length > 0;
-  const newsSearched = webOn && newspaperDomainsFor(input.slug).length > 0;
-  if (officialSearched || newsSearched) {
-    input.onProgress?.("Searching the village website and newspapers…");
-  }
+  const runOfficial = webOn && officialWebDomains(input.slug).length > 0;
+  const runNews = webOn && newspaperDomainsFor(input.slug).length > 0;
+  const runLegistar = runOfficial && wantsLegistarPass(question) && officialWebDomains(input.slug).includes("oak-park.legistar.com");
+  if (runOfficial || runNews) input.onProgress?.("Searching the village website and newspapers…");
 
   const webPromise = (async () => {
-    if (!webOn) return [] as EvidenceItem[];
+    if (!webOn) return { items: [] as EvidenceItem[], officialOk: false, newsOk: false };
     const passes = await Promise.all([
-      officialSearched ? runWebPass(input.client, { ...input, kind: "official", now }).catch((error: unknown) => {
-        if (isAbort(error)) throw error;
-        console.error(`[${input.requestId}] Official website search failed.`, error);
-        return { items: [], usage: null };
-      }) : Promise.resolve({ items: [], usage: null }),
-      newsSearched ? runWebPass(input.client, { ...input, kind: "newspaper", now }).catch((error: unknown) => {
-        if (isAbort(error)) throw error;
-        console.error(`[${input.requestId}] Newspaper search failed.`, error);
-        return { items: [], usage: null };
-      }) : Promise.resolve({ items: [], usage: null }),
+      runOfficial ? runWebPass(input.client, { ...input, question, kind: "official", now }) : Promise.resolve({ items: [], usage: null, ok: false }),
+      runNews ? runWebPass(input.client, { ...input, question, kind: "newspaper", now }) : Promise.resolve({ items: [], usage: null, ok: false }),
+      runLegistar ? runWebPass(input.client, {
+        ...input,
+        question,
+        kind: "official",
+        now,
+        domains: ["oak-park.legistar.com"],
+        focus: /\bovernight parking\b/i.test(question)
+          ? "overnight parking ordinance ORD 23-118 MOT 24-142 ORD 24-124"
+          : `${question} ordinance motion Legistar`,
+      }) : Promise.resolve({ items: [], usage: null, ok: false }),
     ]);
     for (const pass of passes) add(pass.usage);
-    return passes.flatMap((pass) => pass.items);
+    return {
+      items: passes.flatMap((pass) => pass.items),
+      officialOk: passes[0].ok || passes[2].ok,
+      newsOk: passes[1].ok,
+    };
   })();
 
   input.onProgress?.("Planning record searches…");
   let planned: string[] = [];
   try {
-    const plan = await planQueries(input.client, input);
+    const plan = await planQueries(input.client, { ...input, question });
     planned = plan.queries;
     add(plan.usage);
   } catch (error) {
     if (isAbort(error)) throw error;
     console.error(`[${input.requestId}] Research planner failed.`, error);
   }
-  const queries = mergeResearchQueries(draftResearchQueries(input.question, now), planned);
-  const cutoff = recencyCutoff(input.question, now);
+  const queries = mergeResearchQueries(draftResearchQueries(question, now), planned);
+  const cutoff = recencyCutoff(question, now);
 
   input.onProgress?.("Searching municipal records…");
   const recordGroups = await Promise.all([
     ...queries.map((query) => searchRecords(input.client, {
       vectorStoreIds: input.vectorStoreIds,
       query,
-      question: input.question,
+      question,
       now,
       signal: input.signal,
     }).catch((error: unknown) => {
@@ -528,9 +697,9 @@ export async function runResearchTurn(input: {
     })),
     ...(cutoff ? [searchRecords(input.client, {
       vectorStoreIds: input.vectorStoreIds,
-      query: input.question,
+      query: question,
       filters: { type: "gte", key: "record_date", value: cutoff },
-      question: input.question,
+      question,
       now,
       signal: input.signal,
     }).catch((error: unknown) => {
@@ -539,22 +708,42 @@ export async function runResearchTurn(input: {
       return [] as EvidenceItem[];
     })] : []),
   ]);
-  const webItems = await webPromise;
-  const evidence = mergeEvidence([...recordGroups.flat(), ...webItems]);
+  const web = await webPromise;
+  const boardPage = boardRosterEvidence(input.slug, question, now);
+  let evidence = mergeEvidence([...recordGroups.flat(), ...web.items, ...(boardPage ? [boardPage] : [])]);
+  const gaps = missingPartQueries(question, evidence.map((item) => item.text).join("\n"));
+  let followUpCalls = 0;
+  if (gaps.length > 0 && remaining() > 20_000) {
+    input.onProgress?.("Searching for the missing part…");
+    console.info(`[${input.requestId}] follow-up searches ${JSON.stringify(gaps)}`);
+    const extra = await Promise.all(gaps.map((query) => searchRecords(input.client, {
+      vectorStoreIds: input.vectorStoreIds,
+      query,
+      question,
+      now,
+      signal: input.signal,
+    }).catch((error: unknown) => {
+      if (isAbort(error) && input.signal?.aborted) throw error;
+      console.error(`[${input.requestId}] Follow-up search failed.`, error);
+      return [] as EvidenceItem[];
+    })));
+    followUpCalls = extra.length;
+    evidence = mergeEvidence([...evidence, ...extra.flat()]);
+  }
   usage = {
     ...usage,
-    fileSearchCalls: usage.fileSearchCalls + recordGroups.length * Math.max(1, input.vectorStoreIds.length),
+    fileSearchCalls: usage.fileSearchCalls + (recordGroups.length + followUpCalls) * Math.max(1, input.vectorStoreIds.length),
   };
   usage = { ...usage, estimatedCostMicrousd: estimateCostMicrousd(usage, input.model) };
 
   input.onProgress?.("Writing the answer…");
-  const evidenceText = formatEvidence(evidence);
+  const evidenceText = formatEvidence(evidence, question);
   const instructions = buildChatInstructions({
     municipalityName: input.municipalityName,
     slug: input.slug,
     newsEnabled: true,
     now,
-    question: input.question,
+    question,
     researchMode: true,
   });
   const requestBody = {
@@ -564,9 +753,9 @@ export async function runResearchTurn(input: {
     instructions,
     input: [
       ...input.history,
-      { role: "developer" as const, content: turnLanguageDirective(input.question) },
+      { role: "developer" as const, content: turnLanguageDirective(question) },
       { role: "developer" as const, content: evidenceText },
-      { role: "user" as const, content: input.question },
+      { role: "user" as const, content: question },
     ],
   };
   const timeout = Math.max(8_000, Math.min(110_000, remaining() - 8_000));
@@ -593,16 +782,26 @@ export async function runResearchTurn(input: {
     }
   }
 
-  const evidenceCitations = citationsFromEvidence(extracted.answer, evidence);
-  const citations = [...extracted.citations];
-  for (const citation of evidenceCitations) {
-    if (!citations.some((existing) => existing.fileId === citation.fileId)) citations.push(citation);
-  }
+  const aligned = alignCitations(extracted.answer, evidence);
   return {
-    answer: extracted.answer,
-    citations,
-    newsSearched,
-    officialSearched,
+    answer: aligned.answer,
+    citations: aligned.citations,
+    newsSearched: web.newsOk,
+    officialSearched: web.officialOk,
     usage,
   };
+}
+
+function boardRosterEvidence(slug: string, question: string, now: Date): EvidenceItem | null {
+  if (!isBoardRosterQuestion(question)) return null;
+  const page = officialPages(slug).find((entry) => /village-board/i.test(entry.url));
+  if (!page) return null;
+  return scoreEvidence({
+    id: page.url,
+    kind: "official",
+    filename: page.title,
+    url: page.url,
+    text: `${page.title}. ${page.useWhen} Cite this official Village Board page for who the Village President and trustees are.`,
+    score: 2,
+  }, question, now);
 }

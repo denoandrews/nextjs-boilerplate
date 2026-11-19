@@ -16,8 +16,14 @@ type ChatLog = {
   model: string;
 };
 
+/** Skip writing conversations while a live test still uses Supabase for municipality lookup. */
+export function chatLogDisabled(raw = process.env.MUNIGPT_DISABLE_CHAT_LOG): boolean {
+  const value = raw?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "on" || value === "yes";
+}
+
 export async function logChatExchange(input: ChatLog): Promise<{ conversationId?: string }> {
-  if (!input.municipalityId || !isSupabaseAdminConfigured()) return {};
+  if (chatLogDisabled() || !input.municipalityId || !isSupabaseAdminConfigured()) return {};
 
   try {
     const supabase = createAdminClient();

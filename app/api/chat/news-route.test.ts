@@ -67,7 +67,7 @@ describe("newspaper search request flow", () => {
     expect(mocks.create.mock.calls[0][0].tools).toContainEqual(expect.objectContaining({
       type: "web_search",
       external_web_access: true,
-      filters: { allowed_domains: ["oakpark.com", "chicagotribune.com", "oak-park.us", "www.oak-park.us", "oak-park.legistar.com"] },
+      filters: { allowed_domains: ["oakpark.com", "www.oakpark.com", "chicagotribune.com", "www.chicagotribune.com", "oak-park.us", "www.oak-park.us", "oak-park.legistar.com"] },
     }));
     expect(mocks.log.mock.calls[0][0].citations).toEqual(body.citations);
   });
@@ -78,7 +78,7 @@ describe("newspaper search request flow", () => {
     await POST(new Request("https://app.test/api/chat", { method: "POST", body: JSON.stringify({ message: "[TEST] ¿Cómo pago una multa de estacionamiento?", municipalitySlug: "oak-park-il" }) }));
     expect(mocks.create.mock.calls[0][0].instructions).toContain("Language for this turn: Spanish.");
     expect(mocks.create.mock.calls[0][0].input.at(-2).content).toContain("Write every sentence of the answer in Spanish.");
-    expect(mocks.create.mock.calls[0][0].input.at(-1)).toEqual({ role: "user", content: "[TEST] ¿Cómo pago una multa de estacionamiento?" });
+    expect(mocks.create.mock.calls[0][0].input.at(-1)).toEqual({ role: "user", content: "¿Cómo pago una multa de estacionamiento?" });
   });
   it("keeps Strawberry Point restricted to its own document search", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-only");
