@@ -22,7 +22,11 @@ vi.mock("openai", () => ({
 vi.mock("@/lib/municipalities", () => ({ getMunicipalityConfig: mocks.config }));
 vi.mock("@/lib/chat-limits", () => ({ reserveChatQuery: async () => ({ allowed: true }) }));
 vi.mock("@/lib/chat-logging", () => ({ logChatExchange: async (input: unknown) => { mocks.log(input); return {}; } }));
-vi.mock("@/lib/chat-usage", () => ({ extractChatUsage: () => ({}), logUsageEvent: mocks.usage }));
+vi.mock("@/lib/chat-usage", () => ({
+  extractChatUsage: () => ({}),
+  addChatUsage: (left: unknown, right: unknown) => ({ ...(left as object), ...(right as object) }),
+  logUsageEvent: mocks.usage,
+}));
 import { POST } from "./route";
 
 afterEach(() => { vi.clearAllMocks(); vi.unstubAllEnvs(); });
@@ -37,7 +41,7 @@ describe("newspaper search request flow", () => {
     expect(body.answer).toBe("News [News 1]");
     expect(body.newsSearched).toBe(true);
     expect(mocks.create.mock.calls[0][0].model).toBe("gpt-5.4-mini");
-    expect(mocks.create.mock.calls[0][0].max_output_tokens).toBe(4000);
+    expect(mocks.create.mock.calls[0][0].max_output_tokens).toBe(16_000);
     expect(mocks.create.mock.calls[0][0].include).toEqual(["file_search_call.results"]);
     expect(mocks.create.mock.calls[0][0].instructions).toContain("America/Chicago");
     expect(mocks.create.mock.calls[0][0].instructions).toContain("in the past");
@@ -149,8 +153,68 @@ describe("newspaper search request flow", () => {
     expect(index).toContain("title: October 13 minutes");
     expect(index).toContain("record_date: 20261013");
     expect(index).toContain("record_date: none");
-    expect(index.indexOf("2026-10-13-minutes.pdf")).toBeLessThan(index.indexOf("2017-minutes.pdf"));
-    expect(index.indexOf("2017-minutes.pdf")).toBeLessThan(index.indexOf("record_date: none"));
+    expect(index).toContain("packet.pdf");
+    expect(index).toContain("Undated files are not penalized");
+  });
+
+  it("retries once at low effort when the model returns no text", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-only");
+    mocks.config.mockResolvedValue({ id: "oak", slug: "oak-park-il", name: "Oak Park", vectorStoreIds: ["vs-oak"] });
+    mocks.create
+      .mockResolvedValueOnce({
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        usage: {
+          input_tokens: 100,
+          output_tokens: 16_000,
+          output_tokens_details: { reasoning_tokens: 16_000 },
+          total_tokens: 16_100,
+        },
+        output: [{ type: "file_search_call" }, { type: "file_search_call" }],
+      })
+      .mockResolvedValueOnce({
+        status: "completed",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 80,
+          output_tokens_details: { reasoning_tokens: 10 },
+          total_tokens: 180,
+        },
+        output: [{ type: "message", content: [{ type: "output_text", text: "Spending rose across the three fiscal years.", annotations: [] }] }],
+      });
+    const response = await POST(new Request("https://app.test/api/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        message: "How has the village budget changed over the last three years?",
+        municipalitySlug: "oak-park-il",
+      }),
+    }));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.answer).toBe("Spending rose across the three fiscal years.");
+    expect(body.answer).not.toContain("could not establish");
+    expect(mocks.create).toHaveBeenCalledTimes(2);
+    expect(mocks.create.mock.calls[0][0].max_output_tokens).toBe(16_000);
+    expect(mocks.create.mock.calls[0][0].reasoning).toEqual({ effort: "medium" });
+    expect(mocks.create.mock.calls[1][0].reasoning).toEqual({ effort: "low" });
+    expect(mocks.create.mock.calls[1][0].max_output_tokens).toBe(16_000);
+  });
+
+  it("keeps a partial answer instead of retrying when the model did write text", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-only");
+    mocks.config.mockResolvedValue({ id: "oak", slug: "oak-park-il", name: "Oak Park", vectorStoreIds: ["vs-oak"] });
+    mocks.create.mockResolvedValue({
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [{ type: "message", content: [{ type: "output_text", text: "The levy increased.", annotations: [] }] }],
+    });
+    const response = await POST(new Request("https://app.test/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ message: "Compare the levy.", municipalitySlug: "oak-park-il" }),
+    }));
+    const body = await response.json();
+    expect(body.answer).toContain("The levy increased.");
+    expect(mocks.create).toHaveBeenCalledTimes(1);
   });
 
   it("does not filter history questions or a lone ordinance question", async () => {

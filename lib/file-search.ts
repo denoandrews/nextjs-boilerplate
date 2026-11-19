@@ -10,6 +10,11 @@ import type { ComparisonFilter } from "openai/resources/shared";
  * and only for types that are safe to require. A lone ordinance filter is not
  * applied: the current rule often lives in guidelines or a policy file.
  * Everything else stays unfiltered.
+ *
+ * The attribute index is ranked by similarity times a recency boost: 1.3 within
+ * 18 months and 1.15 within 36 months. Undated files are not penalized, and a
+ * history question gets no boost. The hosted file-search tool still ranks by
+ * relevance; this list is what tells the model which records are recent.
  */
 
 export const FILE_SEARCH_MAX_RESULTS = 24;
@@ -46,7 +51,86 @@ export type AttributeHit = {
   recordDate?: number;
   documentType?: string;
   status?: string;
+  /** Similarity score from vector store search. Missing scores are treated as equal, not as zero. */
+  score?: number;
+  /** Relevance times the date boost. Set by rankAttributeHits. */
+  rankScore?: number;
 };
+
+/** Records dated within this many months get the stronger recency boost. */
+export const DATE_BOOST_RECENT_MONTHS = 18;
+/** Records dated within this many months, but not the recent window, get a smaller boost. */
+export const DATE_BOOST_NEAR_MONTHS = 36;
+export const DATE_BOOST_RECENT = 1.3;
+export const DATE_BOOST_NEAR = 1.15;
+
+const HISTORY_QUESTION =
+  /\b(?:histories|history|historical|historia|over the years|through the years)\b/i;
+
+export function questionAsksAboutHistory(question: string): boolean {
+  return HISTORY_QUESTION.test(question);
+}
+
+export function calendarStamp(now: Date, timeZone = "America/Chicago"): number {
+  const iso = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+  return Number(iso.replaceAll("-", ""));
+}
+
+/** Calendar months before a YYYYMMDD stamp, clamping the day to the target month. */
+export function shiftMonths(stamp: number, months: number): number {
+  const year = Math.floor(stamp / 10_000);
+  const month = Math.floor((stamp % 10_000) / 100);
+  const day = stamp % 100;
+  const anchor = new Date(Date.UTC(year, month - 1 - months, 1));
+  const lastDay = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() + 1, 0)).getUTCDate();
+  return anchor.getUTCFullYear() * 10_000 + (anchor.getUTCMonth() + 1) * 100 + Math.min(day, lastDay);
+}
+
+/**
+ * Relevance multiplier for a record date. Undated files stay at 1, so a missing
+ * date is not treated as old. History questions get no boost.
+ */
+export function dateBoostFor(recordDate: number | undefined, nowStamp: number, skip: boolean): number {
+  if (skip || recordDate === undefined) return 1;
+  if (recordDate >= shiftMonths(nowStamp, DATE_BOOST_RECENT_MONTHS)) return DATE_BOOST_RECENT;
+  if (recordDate >= shiftMonths(nowStamp, DATE_BOOST_NEAR_MONTHS)) return DATE_BOOST_NEAR;
+  return 1;
+}
+
+export function rankAttributeHits(
+  hits: AttributeHit[],
+  options: { question?: string; now?: Date; timeZone?: string } = {},
+): AttributeHit[] {
+  const nowStamp = calendarStamp(options.now ?? new Date(), options.timeZone ?? "America/Chicago");
+  const skip = options.question ? questionAsksAboutHistory(options.question) : false;
+  const unique = new Map<string, AttributeHit & { index: number; rankScore: number }>();
+  hits.forEach((hit, index) => {
+    if (!hit.fileId) return;
+    const score = typeof hit.score === "number" && Number.isFinite(hit.score) ? hit.score : 1;
+    const next = { ...hit, score, rankScore: score * dateBoostFor(hit.recordDate, nowStamp, skip), index };
+    const existing = unique.get(hit.fileId);
+    if (existing && existing.rankScore >= next.rankScore) return;
+    unique.set(hit.fileId, existing ? { ...next, index: existing.index } : next);
+  });
+  return [...unique.values()]
+    .sort((left, right) => right.rankScore - left.rankScore || left.index - right.index)
+    .slice(0, FILE_SEARCH_MAX_RESULTS)
+    .map(({ fileId, filename, title, recordDate, documentType, status, score, rankScore }) => ({
+      fileId,
+      filename,
+      title,
+      recordDate,
+      documentType,
+      status,
+      score,
+      rankScore,
+    }));
+}
 
 export function fileSearchFilters(question: string, slug: string): ComparisonFilter | undefined {
   if (!DOCUMENT_TYPE_READY.has(slug)) return undefined;
@@ -94,15 +178,11 @@ function attributeText(attributes: { [key: string]: string | number | boolean } 
   return typeof value === "string" && value.trim() ? value.trim().slice(0, 240) : undefined;
 }
 
-export function formatAttributeIndex(hits: AttributeHit[]): string | null {
-  const unique = new Map<string, AttributeHit>();
-  for (const hit of hits) {
-    if (!hit.fileId || unique.has(hit.fileId)) continue;
-    unique.set(hit.fileId, hit);
-  }
-  const rows = [...unique.values()]
-    .sort((left, right) => (right.recordDate ?? -1) - (left.recordDate ?? -1))
-    .slice(0, FILE_SEARCH_MAX_RESULTS);
+export function formatAttributeIndex(
+  hits: AttributeHit[],
+  options: { question?: string; now?: Date; timeZone?: string } = {},
+): string | null {
+  const rows = rankAttributeHits(hits, options);
   if (rows.length === 0) return null;
 
   const lines = rows.map((row) => {
@@ -111,7 +191,7 @@ export function formatAttributeIndex(hits: AttributeHit[]): string | null {
   });
 
   return [
-    "Attribute index for this question. It is not the full archive. Match each filename to the file-search passages. record_date is YYYYMMDD, so 20261013 is October 13, 2026. record_date none means the file has no date attribute; still use it, and take the date from the filename or heading. Newer record_date values are listed first. Among records of the same kind, prefer a newer document unless the question asks about history.",
+    "Attribute index for this question. It is not the full archive. Match each filename to the file-search passages. record_date is YYYYMMDD, so 20261013 is October 13, 2026. record_date none means the file has no date attribute; still use it, and take the date from the filename or heading. Rows are ranked by relevance. A record under 18 months old is boosted, and a record under 36 months old is boosted less. Undated files are not penalized. There is no recency boost when the question asks about history.",
     ...lines,
   ].join("\n");
 }
@@ -157,6 +237,7 @@ export async function loadAttributeIndex(
         hits.push({
           fileId: result.file_id,
           filename: result.filename,
+          score: typeof result.score === "number" ? result.score : undefined,
           title: attributeText(attributes, "title"),
           recordDate: recordDateNumber(attributes?.record_date),
           documentType: attributeText(attributes, "document_type"),
@@ -164,7 +245,7 @@ export async function loadAttributeIndex(
         });
       }
     }
-    return formatAttributeIndex(hits);
+    return formatAttributeIndex(hits, { question: input.question });
   } catch (error) {
     if (isCallerAbort(error)) throw error;
     console.error(`[${input.requestId ?? "chat"}] Attribute index search failed.`, error);

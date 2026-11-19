@@ -2,13 +2,14 @@ import OpenAI from "openai";
 import { clarifyLevyAnswer } from "@/lib/answer-quality";
 import { newspaperDomains, extractCitedAnswer } from "@/lib/news-search";
 import { resolveChatModel } from "@/lib/chat-model";
-import { buildChatInstructions, getMaxOutputTokens } from "@/lib/chat-instructions";
+import { buildChatInstructions, getMaxOutputTokens, getRetryOutputTokens } from "@/lib/chat-instructions";
+import { logChatDiagnostics } from "@/lib/chat-diagnostics";
 import { fileSearchFilters, fileSearchTool, loadAttributeIndex } from "@/lib/file-search";
 import { turnLanguageDirective } from "@/lib/ui-locale";
 import { OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT_MS, requestTimedOut } from "@/lib/chat-request";
 import { reserveChatQuery } from "@/lib/chat-limits";
 import { logChatExchange } from "@/lib/chat-logging";
-import { extractChatUsage, logUsageEvent } from "@/lib/chat-usage";
+import { addChatUsage, extractChatUsage, logUsageEvent } from "@/lib/chat-usage";
 import { documentSourceUrls } from "@/lib/document-urls";
 import { withStoredSourceUrls } from "@/lib/source-links";
 import { getMunicipalityConfig } from "@/lib/municipalities";
@@ -167,40 +168,71 @@ export async function POST(req: Request) {
       requestId,
     });
 
-    const response = await client.responses.create(
-      {
-        model,
-        max_output_tokens: getMaxOutputTokens(model, reasoning?.effort),
-        ...(reasoning ? { reasoning } : {}),
-        instructions: buildChatInstructions({
-          municipalityName: municipality.name,
-          slug: municipality.slug,
-          newsEnabled: newsDomains.length > 0,
-          question: message,
-        }),
-        input: buildInput(history, message, attributeIndex),
-        include: ["file_search_call.results"],
-        tools: [
-          fileSearchTool(municipality.vectorStoreIds, filters),
-          ...(newsDomains.length ? [{
-            type: "web_search" as const,
-            filters: { allowed_domains: newsDomains },
-            external_web_access: true,
-            search_context_size: "low" as const,
-          }] : []),
-        ],
-      },
-      { signal: req.signal }
-    );
+    const requestBody = {
+      model,
+      max_output_tokens: getMaxOutputTokens(model, reasoning?.effort),
+      ...(reasoning ? { reasoning } : {}),
+      instructions: buildChatInstructions({
+        municipalityName: municipality.name,
+        slug: municipality.slug,
+        newsEnabled: newsDomains.length > 0,
+        question: message,
+      }),
+      input: buildInput(history, message, attributeIndex),
+      include: ["file_search_call.results" as const],
+      tools: [
+        fileSearchTool(municipality.vectorStoreIds, filters),
+        ...(newsDomains.length ? [{
+          type: "web_search" as const,
+          filters: { allowed_domains: newsDomains },
+          external_web_access: true,
+          search_context_size: "low" as const,
+        }] : []),
+      ],
+    };
 
-    const extracted = extractCitedAnswer(response, newsDomains.length > 0, { slug: municipality.slug });
+    const response = await client.responses.create(requestBody, { signal: req.signal });
+    const firstDiagnostics = logChatDiagnostics(requestId, response);
+    let extracted = extractCitedAnswer(response, newsDomains.length > 0, { slug: municipality.slug });
+    let usage = extractChatUsage(response, model);
+
+    // A reasoning model can spend the whole output budget before it writes any
+    // text. One low-effort retry is cheaper than returning an empty answer.
+    if (!extracted.answer.trim()) {
+      console.info(
+        `[${requestId}] Empty answer (status=${firstDiagnostics.status ?? "unknown"}, incomplete=${firstDiagnostics.incompleteReason ?? "none"}, reasoningTokens=${firstDiagnostics.reasoningTokens}, searchCount=${firstDiagnostics.searchCount}). Retrying once at low effort.`,
+      );
+      try {
+        const retry = await client.responses.create(
+          {
+            ...requestBody,
+            max_output_tokens: getRetryOutputTokens(model, reasoning?.effort),
+            ...(reasoning ? { reasoning: { effort: "low" as const } } : {}),
+          },
+          { signal: req.signal },
+        );
+        const retryDiagnostics = logChatDiagnostics(requestId, retry);
+        const retryExtracted = extractCitedAnswer(retry, newsDomains.length > 0, { slug: municipality.slug });
+        usage = addChatUsage(usage, extractChatUsage(retry, model), model);
+        if (retryExtracted.answer.trim()) {
+          extracted = retryExtracted;
+        } else {
+          console.info(
+            `[${requestId}] Low-effort retry also returned no text (status=${retryDiagnostics.status ?? "unknown"}, incomplete=${retryDiagnostics.incompleteReason ?? "none"}).`,
+          );
+        }
+      } catch (error) {
+        if (requestTimedOut(error)) throw error;
+        console.error(`[${requestId}] Empty-answer retry failed.`, error);
+      }
+    }
+
     const storedUrls = await documentSourceUrls(
       municipality.id,
       extracted.citations.map((citation) => citation.fileId)
     );
     const citations = withStoredSourceUrls(extracted.citations, storedUrls);
     const { answer, newsSearched } = extracted;
-    const usage = extractChatUsage(response, model);
 
     await logUsageEvent({
       municipalityId: municipality.id,

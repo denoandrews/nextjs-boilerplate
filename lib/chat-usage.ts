@@ -12,6 +12,8 @@ export type ChatUsage = {
   totalTokens: number;
   fileSearchCalls: number;
   webSearchCalls?: number;
+  reasoningTokens?: number;
+  incompleteReason?: string | null;
   estimatedCostMicrousd: number;
 };
 
@@ -58,9 +60,25 @@ export function extractChatUsage(response: OpenAI.Responses.Response, model?: st
     totalTokens,
     fileSearchCalls,
     webSearchCalls: response.output.filter((item) => item.type === "web_search_call").length,
+    reasoningTokens: response.usage?.output_tokens_details?.reasoning_tokens ?? 0,
+    incompleteReason: response.incomplete_details?.reason ?? null,
   };
 
   return { ...rawUsage, estimatedCostMicrousd: estimateCostMicrousd(rawUsage, model) };
+}
+
+export function addChatUsage(left: ChatUsage, right: ChatUsage, model?: string): ChatUsage {
+  const merged = {
+    inputTokens: left.inputTokens + right.inputTokens,
+    cachedInputTokens: left.cachedInputTokens + right.cachedInputTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+    totalTokens: left.totalTokens + right.totalTokens,
+    fileSearchCalls: left.fileSearchCalls + right.fileSearchCalls,
+    webSearchCalls: (left.webSearchCalls ?? 0) + (right.webSearchCalls ?? 0),
+    reasoningTokens: (left.reasoningTokens ?? 0) + (right.reasoningTokens ?? 0),
+    incompleteReason: left.incompleteReason ?? right.incompleteReason ?? null,
+  };
+  return { ...merged, estimatedCostMicrousd: estimateCostMicrousd(merged, model) };
 }
 
 export async function logUsageEvent(input: UsageEvent): Promise<void> {
@@ -68,7 +86,7 @@ export async function logUsageEvent(input: UsageEvent): Promise<void> {
 
   try {
     const supabase = createAdminClient();
-    const { error } = await supabase.from("usage_events").insert({
+    const row = {
       municipality_id: input.municipalityId,
       request_id: input.requestId,
       model: input.model,
@@ -78,7 +96,24 @@ export async function logUsageEvent(input: UsageEvent): Promise<void> {
       total_tokens: input.totalTokens,
       file_search_calls: input.fileSearchCalls,
       estimated_cost_microusd: input.estimatedCostMicrousd,
-    });
+      reasoning_tokens: input.reasoningTokens ?? 0,
+      incomplete_reason: input.incompleteReason ?? null,
+    };
+    let { error } = await supabase.from("usage_events").insert(row);
+    if (error && /reasoning_tokens|incomplete_reason|schema cache/i.test(error.message)) {
+      const legacy = {
+        municipality_id: row.municipality_id,
+        request_id: row.request_id,
+        model: row.model,
+        input_tokens: row.input_tokens,
+        cached_input_tokens: row.cached_input_tokens,
+        output_tokens: row.output_tokens,
+        total_tokens: row.total_tokens,
+        file_search_calls: row.file_search_calls,
+        estimated_cost_microusd: row.estimated_cost_microusd,
+      };
+      ({ error } = await supabase.from("usage_events").insert(legacy));
+    }
 
     if (error) throw error;
   } catch (error) {

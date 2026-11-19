@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { estimateCostMicrousd, extractChatUsage } from "./chat-usage";
+import { addChatUsage, estimateCostMicrousd, extractChatUsage } from "./chat-usage";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -73,6 +73,46 @@ describe("chat usage accounting", () => {
       outputTokens: 45,
       totalTokens: 168,
       fileSearchCalls: 1,
+      reasoningTokens: 0,
+      incompleteReason: null,
+    });
+  });
+
+  it("records reasoning tokens, search count, and the incomplete reason", () => {
+    const usage = extractChatUsage({
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      usage: {
+        input_tokens: 20,
+        input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+        output_tokens: 4_000,
+        output_tokens_details: { reasoning_tokens: 3_900 },
+        total_tokens: 4_020,
+      },
+      output: [{ type: "file_search_call" }, { type: "file_search_call" }, { type: "file_search_call" }],
+    } as never);
+
+    expect(usage).toMatchObject({
+      reasoningTokens: 3_900,
+      fileSearchCalls: 3,
+      incompleteReason: "max_output_tokens",
+    });
+    const retry = extractChatUsage({
+      status: "completed",
+      usage: {
+        input_tokens: 20,
+        input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+        output_tokens: 40,
+        output_tokens_details: { reasoning_tokens: 5 },
+        total_tokens: 60,
+      },
+      output: [{ type: "message" }],
+    } as never);
+    expect(addChatUsage(usage, retry, "gpt-5.4-mini")).toMatchObject({
+      reasoningTokens: 3_905,
+      fileSearchCalls: 3,
+      outputTokens: 4_040,
+      incompleteReason: "max_output_tokens",
     });
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildChatInstructions, getMaxOutputTokens, municipalClock, timeZoneForSlug } from "./chat-instructions";
+import { buildChatInstructions, getMaxOutputTokens, getRetryOutputTokens, municipalClock, timeZoneForSlug } from "./chat-instructions";
 import { FILE_SEARCH_MAX_RESULTS } from "./file-search";
 
 afterEach(() => {
@@ -27,14 +27,29 @@ describe("municipal clock and instructions", () => {
     expect(instructions).toContain("Do not open with Yes or No");
     expect(instructions).toContain("general fund");
     expect(instructions).toContain("property tax levy is not the general fund");
-    expect(instructions).toContain("$19,125,000");
     expect(instructions).toContain("not the general fund budget");
+    expect(instructions).not.toContain("$19,125,000");
+    expect(instructions).not.toContain("$114,695,709");
+    expect(instructions).not.toContain("100 square feet");
+    expect(instructions.toLowerCase()).not.toContain("concise");
     expect(instructions).toContain("language of the latest user question");
     expect(instructions).toContain("previous question was Spanish");
     expect(instructions).toContain("put its exact URL");
     expect(instructions).toContain("Language for this turn: English.");
-    expect(instructions).toContain("$114,695,709");
     expect(instructions).toContain("records do not include a future meeting");
+    expect(instructions).toContain("Research method");
+    expect(instructions).toContain("dated timeline");
+    expect(instructions).toContain("Cite every factual sentence");
+    expect(instructions).toContain("What I couldn't find");
+    expect(instructions).toContain("records may be incomplete");
+    expect(instructions).toContain("only as a candidate");
+    expect(instructions).toContain("Do not conclude the person was not a Village official");
+    expect(instructions).toContain("official municipal website");
+    expect(instructions).toContain("https://www.oak-park.us/");
+    expect(instructions).not.toContain("Milstein");
+    expect(instructions).toContain("If you want, I can");
+    expect(instructions).toContain('do not open with "only a sample"');
+    expect(instructions.split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(1_150);
     expect(instructions).toContain("vendor proposal");
     expect(instructions).toContain("https://www.oak-park.us/Building-Business/Building-Permits");
     expect(instructions).toContain("pickup day");
@@ -50,7 +65,6 @@ describe("municipal clock and instructions", () => {
     expect(instructions).toContain("file-search query must include 2026");
     expect(instructions).toContain("also include October");
     expect(instructions).toContain("not a parking provider");
-    expect(instructions).toContain("100 square feet");
     expect(instructions).not.toContain("can still be the current revised code");
     expect(instructions).toContain("You do not have a weather tool");
     expect(instructions).toContain("https://www.oak-park.us/Services-Parking/Waste-Recycling/Garbage-Collection");
@@ -119,11 +133,17 @@ describe("municipal clock and instructions", () => {
     expect(getMaxOutputTokens("gpt-5.4-mini")).toBe(1600);
     expect(getMaxOutputTokens("gpt-5.4-mini", "none")).toBe(1600);
     expect(getMaxOutputTokens("gpt-5.4-mini", "low")).toBe(1600);
-    expect(getMaxOutputTokens("gpt-5.4-mini", "medium")).toBe(4000);
-    expect(getMaxOutputTokens("gpt-5.4-mini", "high")).toBe(4000);
+    expect(getMaxOutputTokens("gpt-5.4-mini", "medium")).toBe(16_000);
+    expect(getMaxOutputTokens("gpt-5.4-mini", "high")).toBe(16_000);
+    expect(getMaxOutputTokens("gpt-5.4-mini", "xhigh")).toBe(16_000);
+    expect(getRetryOutputTokens("gpt-5.4-mini", "low")).toBe(16_000);
+    expect(getRetryOutputTokens("gpt-4.1-mini")).toBe(800);
     vi.stubEnv("OPENAI_MAX_OUTPUT_TOKENS", "500");
     expect(getMaxOutputTokens("gpt-5.4-mini", "medium")).toBe(500);
+    expect(getRetryOutputTokens("gpt-5.4-mini", "low")).toBe(500);
     vi.stubEnv("OPENAI_MAX_OUTPUT_TOKENS", "9000");
-    expect(getMaxOutputTokens("gpt-4.1-mini")).toBe(8000);
+    expect(getMaxOutputTokens("gpt-4.1-mini")).toBe(9000);
+    vi.stubEnv("OPENAI_MAX_OUTPUT_TOKENS", "40000");
+    expect(getMaxOutputTokens("gpt-5.4-mini", "medium")).toBe(32_000);
   });
 });
