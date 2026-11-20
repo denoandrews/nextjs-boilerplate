@@ -50,6 +50,15 @@ describe("file search filters", () => {
     expect(JSON.stringify(filter)).not.toContain("record_date");
   });
 
+  it("broadens a legislative question across minutes, agendas, ordinances, and resolutions", () => {
+    expect(fileSearchFilters("What did the latest minutes say about the adopted ordinance?", "oak-park-il")).toEqual({
+      type: "in",
+      key: "document_type",
+      value: ["minutes", "agenda", "ordinance", "resolution"],
+    });
+    expect(fileSearchFilters("What motion was adopted about overnight parking?", "oak-park-il")).toBeUndefined();
+  });
+
   it("stays unfiltered when a filter would hide the better source or files without attributes", () => {
     expect(fileSearchFilters("What does the fence ordinance allow?", "oak-park-il")).toBeUndefined();
     expect(fileSearchFilters("What is the history of the budget?", "oak-park-il")).toBeUndefined();

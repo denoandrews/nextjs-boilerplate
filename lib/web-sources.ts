@@ -83,8 +83,27 @@ export function sanitizeUrlText(value: string): string {
   return text;
 }
 
-/** Longest configured domain wins, so www.oak-park.us stays official rather than a shorter suffix. */
-export function matchWebUrl(value: string, sources: WebSource[] = Object.values(MUNICIPAL_WEB_SOURCES).flat()): MatchedWebUrl | null {
+function trackingParamName(part: string): string {
+  const name = part.split("=", 1)[0] ?? "";
+  try {
+    return decodeURIComponent(name.replace(/\+/g, " "));
+  } catch {
+    return name;
+  }
+}
+
+/** Drop `utm_*` query params, including `utm_source=openai`, and keep every other parameter in order. */
+function stripTrackingParams(url: URL): void {
+  if (!url.search || url.search.length <= 1) return;
+  const kept = url.search
+    .slice(1)
+    .split("&")
+    .filter((part) => part.length > 0 && !/^utm_/i.test(trackingParamName(part)));
+  url.search = kept.length > 0 ? `?${kept.join("&")}` : "";
+}
+
+/** An https URL with tracking parameters removed. Rejects credentials and other schemes. */
+export function canonicalHttpsUrl(value: string): URL | null {
   let parsed: URL;
   try {
     parsed = new URL(sanitizeUrlText(value));
@@ -92,6 +111,14 @@ export function matchWebUrl(value: string, sources: WebSource[] = Object.values(
     return null;
   }
   if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
+  stripTrackingParams(parsed);
+  return parsed;
+}
+
+/** Longest configured domain wins, so www.oak-park.us stays official rather than a shorter suffix. */
+export function matchWebUrl(value: string, sources: WebSource[] = Object.values(MUNICIPAL_WEB_SOURCES).flat()): MatchedWebUrl | null {
+  const parsed = canonicalHttpsUrl(value);
+  if (!parsed) return null;
   const matches = sources.filter((source) => hostMatches(parsed.hostname, source.domain));
   if (matches.length === 0) return null;
   matches.sort((left, right) => right.domain.length - left.domain.length);

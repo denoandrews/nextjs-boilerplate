@@ -2,12 +2,22 @@ import { describe, expect, it } from "vitest";
 
 import {
   alignCitations,
-  citeRetrievedNews,
+  contractorQueries,
+  dateWindowAround,
+  descriptionNearLegislativeId,
   draftResearchQueries,
+  filterNewsEvidence,
+  formatEvidence,
+  legislativeIdQueries,
+  legislativeIds,
+  legislativeQueryVariants,
+  legislativeResolutionQueries,
   mergeEvidence,
   missingPartQueries,
+  newsEvidenceIsRelevant,
   parsePlannerQueries,
   personName,
+  RESEARCH_PLANNER_INSTRUCTIONS,
   recencyCutoff,
   researchModeEnabled,
   scoreEvidence,
@@ -54,6 +64,9 @@ describe("research queries", () => {
     const parking = draftResearchQueries("What is the current overnight parking policy?", NOW).join(" ");
     expect(parking).toContain("2023");
     expect(parking).toContain("2024");
+    expect(parking).toMatch(/motion/);
+    expect(parking).toMatch(/approved/);
+    expect(parking).toMatch(/adopted/);
     const lake = draftResearchQueries(
       "What did the board decide about the Lake Street streetscape, how much did it cost, who was the contractor, and were there any change orders?",
       NOW,
@@ -84,6 +97,92 @@ describe("research queries", () => {
   it("reads planner JSON and ignores anything that is not a query list", () => {
     expect(parsePlannerQueries('```json\n{"queries":["Lake Street cost"]}\n```')).toEqual(["Lake Street cost"]);
     expect(parsePlannerQueries("I will answer instead.")).toEqual([]);
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("motion");
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("approved");
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("adopted");
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("agenda");
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("contractor");
+    expect(RESEARCH_PLANNER_INSTRUCTIONS).toContain("letting");
+  });
+
+  it("detects legislative IDs and searches the subject next to them", () => {
+    expect(legislativeIds("ORD 23-118 and Ord. 23-118 and RES 24-12 and MOT 24-142").map((id) => id.canonical)).toEqual([
+      "ORD 23-118",
+      "RES 24-12",
+      "MOT 24-142",
+    ]);
+    expect(legislativeIds("Ordinance 23-118")).toEqual([]);
+    expect(legislativeIdQueries({ kind: "ORD", number: "23-118", canonical: "ORD 23-118" })).toEqual([
+      "ORD 23-118",
+      "Ord. 23-118",
+      "Ordinance 23-118",
+    ]);
+    expect(legislativeIdQueries({ kind: "MOT", number: "24-142", canonical: "MOT 24-142" })).toContain("Motion 24-142");
+    const agenda = "F. ORD 23-118 Reduced Parking Permit Fee Program expansion to affordable-housing sites. Second Reading and Adoption";
+    expect(descriptionNearLegislativeId(agenda, { kind: "ORD", number: "23-118", canonical: "ORD 23-118" }))
+      .toContain("Reduced Parking Permit Fee Program");
+    expect(descriptionNearLegislativeId("The fee program expanded to affordable-housing sites.", { kind: "ORD", number: "23-118", canonical: "ORD 23-118" }))
+      .toBeNull();
+    const motion = "MOT 24-142 Zones Y1/Y2 overnight permit frontages";
+    expect(descriptionNearLegislativeId(motion, { kind: "MOT", number: "24-142", canonical: "MOT 24-142" })).toContain("Y1/Y2");
+    const window = dateWindowAround(20240411);
+    expect(window.start).toBeLessThanOrEqual(20240311);
+    expect(window.end).toBeGreaterThanOrEqual(20240411);
+
+    const indexHit = item({
+      id: "file-agenda",
+      kind: "record",
+      filename: "2023-12-04_VillageBoard_agenda.docx",
+      documentType: "agenda",
+      recordDate: 20231204,
+      text: agenda,
+      score: 0.8,
+    });
+    const body = item({
+      id: "file-ordinance",
+      kind: "record",
+      filename: "2023-12-04_VillageBoard__08_Ordinance.docx",
+      documentType: "ordinance",
+      recordDate: 20231204,
+      text: "Reduced Parking Permit Fee Program expansion to affordable-housing sites.",
+      score: 0.9,
+    });
+    const followUps = legislativeResolutionQueries([body, indexHit]);
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0]?.id).toBe("ORD 23-118");
+    expect(followUps[0]?.query).toContain("affordable-housing");
+    expect(followUps[0]?.recordDate).toBe(20231204);
+    expect(followUps[0]?.dateStart).toBeLessThanOrEqual(20231204);
+    expect(followUps[0]?.dateEnd).toBeGreaterThanOrEqual(20231204);
+    expect(legislativeQueryVariants("What ordinance changed overnight parking?").join(" ")).toMatch(/motion approved/);
+    expect(legislativeQueryVariants("What ordinance changed overnight parking?").join(" ")).toMatch(/adopted/);
+  });
+
+  it("asks for the construction award, not only the design consultant", () => {
+    const question = "Who was the contractor for the Lake Street streetscape?";
+    const queries = contractorQueries(question).join(" ");
+    expect(queries).toContain("Lake Street streetscape contract awarded");
+    expect(queries).toContain("construction contractor bid award");
+    expect(queries).toContain("awarded to");
+    expect(queries).toContain("budget explanation");
+    expect(queries).toContain("IDOT letting");
+    expect(contractorQueries("What is the village population?")).toEqual([]);
+    expect(draftResearchQueries(question, NOW).some((query) => /IDOT letting/i.test(query))).toBe(true);
+    const design = scoreEvidence({
+      id: "design",
+      kind: "record",
+      filename: "design-amendment.pdf",
+      text: "Thomas Engineering Group, the design consultant, amended the engineering contract.",
+      score: 0.95,
+    }, question, NOW);
+    const build = scoreEvidence({
+      id: "build",
+      kind: "record",
+      filename: "budget-explanation.pdf",
+      text: "IDOT awarded the construction contract to R.W. Duntemann Co. for $10,557,783.",
+      score: 0.6,
+    }, question, NOW);
+    expect(build.rankScore).toBeGreaterThan(design.rankScore);
   });
 });
 
@@ -147,16 +246,104 @@ describe("web evidence", () => {
     expect(merged.map((entry) => entry.kind)).toEqual(["record", "official", "newspaper"]);
     const aligned = alignCitations("The board voted. [2] Then the minutes. [3]", merged);
     expect(aligned.answer).toBe("The board voted. [1] Then the minutes. [2]");
+    expect(aligned.answer).not.toContain("Wednesday Journal reported");
     expect(aligned.citations.map((citation) => citation.marker)).toEqual(["[1]", "[2]"]);
     expect(aligned.citations.map((citation) => citation.fileId)).toEqual([
       "https://www.oak-park.us/board",
       "https://www.oakpark.com/story",
     ]);
-    const withNews = citeRetrievedNews("The budget grew. [1]", merged, [
-      { fileId: "file-minutes", filename: "minutes.pdf", marker: "[1]" },
+  });
+
+  it("keeps a newspaper hit only when it overlaps the question's street, person, or topic", () => {
+    const lake = "What did the board decide about the Lake Street streetscape, how much did it cost, who was the contractor, and were there any change orders?";
+    expect(newsEvidenceIsRelevant(lake, "The Percy Julian streetscape is underway on Oak Park Avenue.")).toBe(false);
+    expect(newsEvidenceIsRelevant(lake, "Another Oak Park Ave streetscape update.")).toBe(false);
+    expect(newsEvidenceIsRelevant(lake, "The Lake Street streetscape contract changed.")).toBe(true);
+    expect(newsEvidenceIsRelevant(lake, "Merchants on Lake St. asked for a schedule.")).toBe(true);
+    const budget = "How has the village budget changed over the last three years?";
+    expect(newsEvidenceIsRelevant(budget, "Wednesday Journal: the village drew on budget reserves to close the gap.")).toBe(true);
+    expect(newsEvidenceIsRelevant(budget, "The Percy Julian streetscape opens Saturday.")).toBe(false);
+    expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "Wednesday Journal profile of Milstein.")).toBe(true);
+    expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "A page about water bills and parking permits.")).toBe(false);
+
+    const reserves = item({
+      id: "https://www.oakpark.com/reserves?utm_source=openai",
+      kind: "newspaper",
+      filename: "Wednesday Journal",
+      url: "https://www.oakpark.com/reserves?utm_source=openai",
+      text: "The village drew on budget reserves to close the gap.",
+      score: 0.8,
+    });
+    const otherStreet = item({
+      id: "https://www.oakpark.com/percy",
+      kind: "newspaper",
+      filename: "Wednesday Journal",
+      url: "https://www.oakpark.com/percy",
+      text: "The Percy Julian streetscape is underway on Oak Park Avenue.",
+      score: 0.9,
+    });
+    const record = item({
+      id: "file-budget",
+      kind: "record",
+      filename: "fy26-budget-book.pdf",
+      text: "The FY2026 budget book compares spending.",
+      score: 0.7,
+    });
+    const budgetEvidence = filterNewsEvidence(budget, [otherStreet, reserves, record]);
+    expect(budgetEvidence.map((entry) => entry.id)).toEqual([
+      "https://www.oakpark.com/reserves?utm_source=openai",
+      "file-budget",
     ]);
-    expect(withNews.answer).toContain("Wednesday Journal reported");
-    expect(withNews.citations.some((citation) => citation.url === "https://www.oakpark.com/story")).toBe(true);
-    expect(withNews.answer).toContain(`[${withNews.citations.length}]`);
+    const budgetPrompt = formatEvidence(budgetEvidence, budget);
+    expect(budgetPrompt).toContain("budget reserves");
+    expect(budgetPrompt).toContain("https://www.oakpark.com/reserves");
+    expect(budgetPrompt).not.toContain("utm_source");
+    expect(budgetPrompt).toContain("Integrate each relevant newspaper finding into the answer prose");
+    expect(budgetPrompt).toContain("cite both");
+    expect(budgetPrompt).not.toContain("Percy Julian");
+
+    const lakeEvidence = filterNewsEvidence(lake, [otherStreet, item({
+      id: "https://www.oakpark.com/lake",
+      kind: "newspaper",
+      filename: "Wednesday Journal",
+      url: "https://www.oakpark.com/lake",
+      text: "The Lake Street streetscape contract was awarded.",
+      score: 0.8,
+    })]);
+    expect(lakeEvidence.map((entry) => entry.text)).toEqual(["The Lake Street streetscape contract was awarded."]);
+  });
+
+  it("requires a who-is answer to use newspaper results that name the person", () => {
+    const question = "Who is Robert Milstein?";
+    const kept = filterNewsEvidence(question, [
+      item({
+        id: "https://www.oakpark.com/market",
+        kind: "newspaper",
+        filename: "Wednesday Journal",
+        url: "https://www.oakpark.com/market",
+        text: "The farmers market opens on Saturday.",
+        score: 0.4,
+      }),
+      item({
+        id: "https://www.oakpark.com/milstein?utm_source=openai",
+        kind: "newspaper",
+        filename: "Wednesday Journal",
+        title: "Robert Milstein",
+        url: "https://www.oakpark.com/milstein?utm_source=openai",
+        text: "A Wednesday Journal profile of Robert Milstein.",
+        score: 0.8,
+      }),
+    ]);
+    expect(kept).toHaveLength(1);
+    const prompt = formatEvidence(kept, question);
+    expect(prompt).toContain("You must use every newspaper result that mentions Robert Milstein ([1])");
+    expect(prompt).toContain("https://www.oakpark.com/milstein");
+    expect(prompt).not.toContain("utm_source");
+    const aligned = alignCitations(
+      "Robert Milstein served as a trustee. [1]\n\nThe Wednesday Journal reported: * list a specific pickup day. [2]\n\nThe Chicago Tribune reported:",
+      kept,
+    );
+    expect(aligned.answer).toBe("Robert Milstein served as a trustee. [1]");
+    expect(aligned.citations.map((citation) => citation.url)).toEqual(["https://www.oakpark.com/milstein"]);
   });
 });

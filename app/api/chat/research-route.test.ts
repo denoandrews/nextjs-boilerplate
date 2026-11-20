@@ -93,6 +93,7 @@ describe("research mode", () => {
     const body = await response.json();
     expect(response.status).toBe(200);
     expect(body.answer).toContain("2024 ordinance");
+    expect(body.answer).not.toContain("The Wednesday Journal reported:");
     expect(body.officialSearched).toBe(true);
     expect(body.newsSearched).toBe(true);
     const bodies = mocks.create.mock.calls.map((call) => call[0]);
@@ -135,6 +136,38 @@ describe("research mode", () => {
     expect(queries.some((query) => query.includes("FY2026"))).toBe(true);
   });
 
+  it("sends a relevant budget story to synthesis without a stock newspaper line", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-only");
+    mocks.config.mockResolvedValue(OAK);
+    mocks.search.mockResolvedValue({ data: [{ file_id: "file-budget", filename: "fy26-budget-book.pdf", score: 0.8, attributes: { document_type: "budget", record_date: 20260101 }, content: [{ text: "The FY2026 budget book compares FY2024 and FY2025 spending." }] }] });
+    mocks.create.mockImplementation(async (body: { tools?: { type?: string; filters?: { allowed_domains?: string[] } }[]; instructions?: string; input?: unknown }) => {
+      const kind = callKind(body);
+      if (kind === "plan") return textResponse('{"queries":["FY2024 budget"]}');
+      if (kind === "web") {
+        const domains = body.tools?.[0]?.filters?.allowed_domains ?? [];
+        if (domains.includes("oakpark.com")) {
+          return textResponse("The village drew on budget reserves to balance the budget.", [
+            { type: "url_citation", url: "https://www.oakpark.com/reserves?utm_source=openai", title: "Budget reserves", start_index: 0, end_index: 24 },
+          ]);
+        }
+        return textResponse("Percy Julian streetscape on Oak Park Avenue.");
+      }
+      const evidence = JSON.stringify(body.input);
+      expect(evidence).toContain("budget reserves");
+      expect(evidence).toContain("https://www.oakpark.com/reserves");
+      expect(evidence).not.toContain("utm_source");
+      expect(evidence).toContain("Integrate each relevant newspaper finding into the answer prose");
+      expect(evidence).toContain("cite both");
+      expect(evidence).not.toContain("Percy Julian");
+      return textResponse("The budget grew and the village used reserves. [1]");
+    });
+    const response = await POST(request("How has the village budget changed over the last three years?"));
+    const body = await response.json();
+    expect(body.answer).toContain("reserves");
+    expect(body.answer).not.toContain("The Wednesday Journal reported:");
+    expect(body.newsSearched).toBe(true);
+  });
+
   it("keeps the Lake Street construction contractor in the evidence for a multi-part question", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-only");
     mocks.config.mockResolvedValue(OAK);
@@ -167,7 +200,9 @@ describe("research mode", () => {
         expect(JSON.stringify(body.input)).toContain("Robert Milstein");
         return textResponse("Election filing for Robert Milstein as a candidate.");
       }
-      expect(JSON.stringify(body.input)).not.toContain("former Village Trustee");
+      const evidence = JSON.stringify(body.input);
+      expect(evidence).not.toContain("former Village Trustee");
+      expect(evidence).toContain("You must use every newspaper result that mentions Robert Milstein");
       return textResponse("The retrieved records may be incomplete.");
     });
     const response = await POST(request("Who is Robert Milstein?"));

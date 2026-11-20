@@ -9,7 +9,9 @@ import type { ComparisonFilter } from "openai/resources/shared";
  * record_date is never a filter. document_type is filtered only for Oak Park,
  * and only for types that are safe to require. A lone ordinance filter is not
  * applied: the current rule often lives in guidelines or a policy file.
- * Everything else stays unfiltered.
+ * A question about an adopted ordinance, rule, resolution, or motion is not
+ * narrowed to one document type: the filter also includes minutes, agendas,
+ * ordinances, and resolutions. Everything else stays unfiltered.
  *
  * The attribute index is ranked by similarity times a recency boost: 1.3 within
  * 18 months and 1.15 within 36 months. Undated files are not penalized, and a
@@ -38,6 +40,16 @@ const DOCUMENT_TYPE_CUES: { type: string; pattern: RegExp }[] = [
   { type: "budget", pattern: /\bbudgets?\b|\bpresupuestos?\b/i },
   { type: "ordinance", pattern: /\bordinances?\b|\bordenanzas?\b/i },
 ];
+
+/** Types that can hold an adopted ordinance, resolution, or motion. Motion text usually lives on an agenda or in the minutes. */
+const LEGISLATIVE_DOCUMENT_TYPES = ["minutes", "agenda", "ordinance", "resolution"];
+
+const LEGISLATIVE_QUESTION =
+  /\b(?:ordinances?|laws?|rules?|resolutions?|motions?|adopted|adoption|polic(?:y|ies)|ordenanzas?|leyes|reglas|resoluciones|mociones|adoptad[oa]s?)\b/i;
+
+export function asksAboutLegislation(question: string): boolean {
+  return LEGISLATIVE_QUESTION.test(question);
+}
 
 const MEETING_WORD = /\b(?:meetings?|reuniones|reuni[oó]n)\b/i;
 const RECENCY_WORD = /\b(?:next|upcoming|latest|most recent|last|pr[oó]xim[oa]s?|[uú]ltim[oa]s?)\b/i;
@@ -150,6 +162,11 @@ export function fileSearchFilters(question: string, slug: string): ComparisonFil
   // Guidelines and policies are a better source than an ordinance for many
   // "what is the rule" questions, and they are not document_type=ordinance.
   if (types.length === 1 && types[0] === "ordinance") return undefined;
+  // An adopted change can be a motion in an agenda or the minutes, not only an ordinance file.
+  if (asksAboutLegislation(question)) {
+    const extras = types.filter((type) => !LEGISLATIVE_DOCUMENT_TYPES.includes(type));
+    return { type: "in", key: "document_type", value: [...LEGISLATIVE_DOCUMENT_TYPES, ...extras] };
+  }
   if (types.length === 1) return { type: "eq", key: "document_type", value: types[0] };
   return { type: "in", key: "document_type", value: types };
 }
