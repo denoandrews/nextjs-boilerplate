@@ -98,6 +98,9 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
   }, [applySnapshot, municipalitySlug]);
 
   useLayoutEffect(() => {
+    // Session storage is an external store. Restoring before paint avoids a
+    // greeting flash, and `ready` keeps the write effect from clobbering it.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrate from sessionStorage before paint
     restoreSnapshot();
     setReady(true);
   }, [restoreSnapshot]);
