@@ -7,7 +7,18 @@ import { logChatDiagnostics } from "@/lib/chat-diagnostics";
 import { asksAboutLegislation, recordDateNumber, dateBoostFor, calendarStamp, questionAsksAboutHistory, shiftMonths } from "@/lib/file-search";
 import { excludedCitationFilename, officialPages } from "@/lib/source-links";
 import { addChatUsage, estimateCostMicrousd, extractChatUsage, type ChatUsage } from "@/lib/chat-usage";
-import { extractCitedAnswer, omitInvalidCitationLines, type ChatCitation } from "@/lib/news-search";
+import {
+  describeLegistarMatter,
+  legistarClientFor,
+  legistarFileNumbers,
+  legistarSearchMatters,
+  legistarVectorQuery,
+  matterRecordStamp,
+  queryLegistarMatters,
+  wantsLegistarLookup,
+  type LegistarMatter,
+} from "@/lib/legistar";
+import { extractCitedAnswer, omitEmptyMissingSection, omitInvalidCitationLines, omitTrailingCitationDump, type ChatCitation } from "@/lib/news-search";
 import { turnLanguageDirective } from "@/lib/ui-locale";
 import {
   officialWebDomains,
@@ -15,6 +26,8 @@ import {
   webPassEnabled,
   canonicalHttpsUrl,
   matchWebUrl,
+  IDOT_LETTING_SOURCE,
+  type WebSource,
   type WebSourceKind,
 } from "@/lib/web-sources";
 
@@ -217,6 +230,19 @@ export function dateWindowAround(stamp: number, beforeDays = 60, afterDays = 45)
   return { start: shiftDays(stamp, -beforeDays), end: shiftDays(stamp, afterDays) };
 }
 
+function matterDateFilter(matter: LegistarMatter): CompoundFilter | undefined {
+  const stamp = matterRecordStamp(matter);
+  if (!stamp) return undefined;
+  const window = dateWindowAround(stamp);
+  return {
+    type: "and",
+    filters: [
+      { type: "gte", key: "record_date", value: window.start },
+      { type: "lte", key: "record_date", value: window.end },
+    ],
+  };
+}
+
 function isLegislativeIndexHit(item: EvidenceItem): boolean {
   const type = (item.documentType ?? "").toLowerCase();
   if (type === "ordinance" || type === "resolution") return false;
@@ -274,24 +300,47 @@ export function legislativeQueryVariants(question: string): string[] {
 export function contractorQueries(question: string): string[] {
   if (!asksAboutConstruction(question)) return [];
   const topic = projectPhrase(question);
+  // These searches stay unfiltered. The award often lives in a budget-explanation
+  // file whose document_type is ordinance or budget, not a construction contract.
+  const project = /streetscape/i.test(topic) ? topic : `${topic} streetscape`;
   return [
+    `${project} contract awarded IDOT bid`,
+    `${topic} Section awarded to`,
     `${topic} contract awarded`,
     `${topic} construction contract awarded`,
     `${topic} construction contractor bid award`,
     `${topic} awarded to`,
+    `${topic} low bidder`,
     `${topic} budget explanation`,
     `${topic} IDOT letting`,
   ];
+}
+
+const AWARD_NEAR_COMPANY = /\b(?:awarded(?:\s+(?:a|the)\s+(?:construction\s+)?contract)?(?:\s+to)?|construction contract|low bidder|lettings?|bid and awarded)\b/i;
+const COMPANY_NAME = /\b[A-Z][A-Za-z&'.-]+(?:\s+[A-Z][A-Za-z&'.-]+){0,4}\s(?:Co\.|Inc\.|LLC|Corp\.|Company)\b/g;
+
+/**
+ * A design consultant's Inc. or LLC is not the construction award.
+ * The award counts only when award or construction language sits next to the company.
+ */
+export function constructionAwardCovered(evidenceText: string): boolean {
+  if (/\bawarded(?:\s+(?:a|the)\s+construction\s+contract)?\s+to\s+[A-Z]/i.test(evidenceText)) return true;
+  for (const match of evidenceText.matchAll(COMPANY_NAME)) {
+    const at = match.index ?? 0;
+    const window = evidenceText.slice(Math.max(0, at - 140), Math.min(evidenceText.length, at + match[0].length + 40));
+    if (AWARD_NEAR_COMPANY.test(window)) return true;
+  }
+  return false;
 }
 
 /** Parts the merged evidence still does not answer, with a targeted follow-up query for each. */
 export function missingPartQueries(question: string, evidenceText: string): string[] {
   const text = stripHarnessPrefix(question);
   const topic = topicPhrase(text);
-  const checks: { when: RegExp; covered: RegExp; queries: string[] }[] = [
+  const checks: { when: RegExp; covered: RegExp | ((evidence: string) => boolean); queries: string[] }[] = [
     {
       when: CONSTRUCTION_QUESTION,
-      covered: /\bawarded to\s+[A-Z]|\b(?:Co\.|Inc\.|LLC|Corp\.)\b/,
+      covered: constructionAwardCovered,
       queries: contractorQueries(text),
     },
     {
@@ -305,7 +354,7 @@ export function missingPartQueries(question: string, evidenceText: string): stri
       queries: [`${topic} change order`],
     },
   ];
-  const parkingCovered = /\b(?:ordinance|motion|ORD|MOT)\b[\s\S]{0,60}\b20(?:23|24)\b|\b20(?:23|24)\b[\s\S]{0,60}\b(?:ordinance|motion|expansion)\b/i;
+  const parkingCovered = /\b(?:ordinance|motion|ORD|MOT)\b[\s\S]{0,80}\b20(?:2[3-6])\b|\b20(?:2[3-6])\b[\s\S]{0,80}\b(?:ordinance|motion|passed|adopted|expansion)\b/i;
   if (/\bovernight parking\b/i.test(text) && /\b(?:current|policy)\b/i.test(text) && !parkingCovered.test(evidenceText)) {
     checks.push({
       when: /./,
@@ -321,9 +370,12 @@ export function missingPartQueries(question: string, evidenceText: string): stri
   }
   const queries: string[] = [];
   for (const check of checks) {
-    if (!check.when.test(text) || check.covered.test(evidenceText)) continue;
+    const covered = typeof check.covered === "function" ? check.covered(evidenceText) : check.covered.test(evidenceText);
+    if (!check.when.test(text) || covered) continue;
     queries.push(...check.queries);
   }
+  // File numbers already answered by a Legistar matter should not open another search wave.
+  if (queries.length === 0) return [];
   return uniqueQueries([...queries, ...discoveredSearchTerms(topic, evidenceText)], 8);
 }
 
@@ -432,10 +484,7 @@ export function significantTerms(text: string): string[] {
 export function webResultIsRelevant(question: string, text: string): boolean {
   const haystack = text.toLowerCase();
   const name = personName(question);
-  if (name) {
-    const surname = personSurname(name);
-    if (surname && !haystack.includes(surname)) return false;
-  }
+  if (name && !textMentionsPerson(name, haystack)) return false;
   const terms = significantTerms(question);
   if (terms.length === 0) return haystack.trim().length > 40;
   return terms.some((term) => haystack.includes(term));
@@ -475,9 +524,64 @@ export function placeEntities(question: string): string[] {
   return [...new Set(entities)];
 }
 
-function personSurname(name: string): string | null {
-  const parts = name.toLowerCase().split(/\s+/).filter((part) => part.length > 2);
-  return parts[parts.length - 1] ?? null;
+const GIVEN_NAME_NICKNAMES: Record<string, string[]> = {
+  robert: ["bob", "rob", "bobby", "robbie"],
+  william: ["bill", "will", "billy", "liam"],
+  james: ["jim", "jimmy"],
+  richard: ["rick", "dick", "rich"],
+  michael: ["mike"],
+  thomas: ["tom", "tommy"],
+  charles: ["charlie", "chuck"],
+  joseph: ["joe"],
+  elizabeth: ["liz", "beth", "betty"],
+  katherine: ["kate", "kathy", "katie"],
+  catherine: ["cathy", "kate", "katie"],
+  daniel: ["dan", "danny"],
+  david: ["dave"],
+  anthony: ["tony"],
+  christopher: ["chris"],
+  stephen: ["steve"],
+  steven: ["steve"],
+  edward: ["ed", "eddie", "ted"],
+  theodore: ["ted", "theo"],
+  nicholas: ["nick"],
+  benjamin: ["ben"],
+  samuel: ["sam"],
+  alexander: ["alex"],
+  andrew: ["andy"],
+  john: ["jack"],
+  patricia: ["pat", "patty"],
+};
+
+/** Surname, plus a short form of the given name such as Bob for Robert. */
+export function personNameVariants(name: string): string[] {
+  const parts = name.toLowerCase().replace(/[.’']/g, "").split(/\s+/).filter((part) => part.length > 1 && !part.endsWith("."));
+  const variants = new Set<string>();
+  const surname = parts[parts.length - 1];
+  const given = parts[0];
+  if (surname && surname.length > 2) variants.add(surname);
+  if (given && given.length > 2) {
+    for (const nickname of GIVEN_NAME_NICKNAMES[given] ?? []) variants.add(nickname);
+  }
+  return [...variants];
+}
+
+export function textMentionsPerson(name: string, text: string): boolean {
+  const haystack = normalizeOverlapText(text);
+  return personNameVariants(name).some((variant) => {
+    if (variant.length <= 3) return new RegExp(`\\b${variant}\\b`).test(haystack);
+    return haystack.includes(variant);
+  });
+}
+
+function hasSentence(text: string): boolean {
+  return /[A-Za-z0-9][.!?](?:\s|$)/.test(text.replace(/https?:\/\/\S+/g, " "));
+}
+
+/** Article prose that names the person. A URL or headline slug does not count. */
+function articleNamesPerson(name: string, text: string): boolean {
+  const prose = text.replace(/https?:\/\/\S+/g, " ");
+  return hasSentence(prose) && textMentionsPerson(name, prose);
 }
 
 /**
@@ -486,15 +590,33 @@ function personSurname(name: string): string | null {
  * A person question keeps a hit only when it names that person.
  */
 export function newsEvidenceIsRelevant(question: string, text: string): boolean {
-  const haystack = normalizeOverlapText(text);
   const name = personName(question);
   if (name) {
-    const surname = personSurname(name);
-    return Boolean(surname && haystack.includes(surname));
+    // A headline slug or bare URL is not coverage. The excerpt itself has to name the person.
+    const prose = text.replace(/https?:\/\/\S+/g, " ");
+    return textMentionsPerson(name, prose);
   }
   const entities = placeEntities(question);
-  if (entities.length > 0) return entities.some((entity) => haystack.includes(entity));
+  if (entities.length > 0) return entities.some((entity) => normalizeOverlapText(text).includes(entity));
   return webResultIsRelevant(question, text);
+}
+
+/**
+ * IDOT letting hits are often bare result URLs. Keep a hit when it names the
+ * street, the streetscape, a section award, or a letting. A URL that shares
+ * none of those words is not evidence of the contractor.
+ */
+export function idotEvidenceIsRelevant(question: string, text: string): boolean {
+  const body = text.toLowerCase();
+  const places = placeEntities(question);
+  const streetHit = places.some((place) => body.includes(place) || body.includes(place.split(" ")[0] ?? ""));
+  const projectHit = /\bstreetscape\b/i.test(question) && /\bstreetscape\b/.test(body);
+  const awardHit = /\b(?:awarded(?:\s+to)?|low bidder|lettings?|bidder)\b/i.test(text);
+  const sectionHit = /\bsection\b/i.test(text) && /\b\d{2}-\d{4,}/.test(text);
+  if (sectionHit && (streetHit || projectHit || awardHit)) return true;
+  if ((streetHit || projectHit) && (awardHit || /\bcontract\b/.test(body))) return true;
+  if (streetHit && projectHit) return true;
+  return false;
 }
 
 export function evidenceSearchText(item: EvidenceItem): string {
@@ -518,18 +640,66 @@ function typeBoost(documentType?: string): number {
   return 1;
 }
 
+function hasAwardLanguage(blob: string): boolean {
+  if (/\b(?:awarded to|low bidder|lettings?|budget explanations?)\b/i.test(blob)) return true;
+  if (/\bconstruction\s+contract\b/i.test(blob)) return true;
+  return /\bawarded\b/i.test(blob) && /\b(?:contract|bidder|letting|IDOT)\b/i.test(blob);
+}
+
+function namesProject(question: string, blob: string): boolean {
+  const project = projectPhrase(question).toLowerCase();
+  if (project === "the project") return false;
+  const haystack = blob.toLowerCase();
+  if (/\bstreetscape\b/.test(project)) return /\bstreetscape\b/.test(haystack);
+  const tokens = project.split(/\s+/).filter((word) => word.length > 3);
+  return tokens.length > 0 && tokens.every((word) => haystack.includes(word));
+}
+
+function unrelatedProject(question: string, blob: string): boolean {
+  const asked = question.toLowerCase();
+  const haystack = blob.toLowerCase();
+  return /\bstreetscape\b/.test(asked)
+    && !/\bstreetscape\b/.test(haystack)
+    && /\b(?:sewer|water ?main|drainage|sanitary)\b/.test(haystack);
+}
+
+/**
+ * Prefer a construction award for the named project over a design consultant
+ * or a different project on the same street. Budget-explanation files carry
+ * the award when the ordinance body does not.
+ */
+export function constructionRankMultiplier(
+  question: string,
+  item: { filename: string; title?: string; text: string },
+): number {
+  if (!asksAboutConstruction(question)) return 1;
+  const blob = `${item.filename}\n${item.title ?? ""}\n${item.text}`;
+  const award = hasAwardLanguage(blob);
+  const design = /\b(?:design|engineering|consultant|architectural)\b/i.test(blob);
+  let multiplier = 1;
+  if (design && !award) multiplier *= 0.45;
+  if (award && namesProject(question, blob)) multiplier *= 1.9;
+  else if (award) multiplier *= 1.25;
+  if (/bud(?:get)?[_ ./-]*explanations?/i.test(`${item.filename} ${item.title ?? ""}`)) multiplier *= 1.4;
+  if (unrelatedProject(question, blob)) multiplier *= 0.4;
+  return multiplier;
+}
+
 export function scoreEvidence(item: Omit<EvidenceItem, "tier" | "rankScore">, question: string, now = new Date()): EvidenceItem {
   const tier: 0 | 1 = item.kind === "newspaper" ? 1 : 0;
   const boost = dateBoostFor(item.recordDate, calendarStamp(now), questionAsksAboutHistory(question));
   let rankScore = item.score * boost * (item.kind === "record" ? typeBoost(item.documentType) : 1);
   if (isBoardRosterQuestion(question) && /village-board/i.test(item.url ?? "")) rankScore += 5;
-  if (asksAboutConstruction(question)) {
-    const blob = `${item.filename}\n${item.title ?? ""}\n${item.text}`;
-    const design = /\b(?:design|engineering|consultant|architectural)\b/i.test(blob);
-    const construction = /\b(?:construction|awarded to|lettings?|IDOT|budget explanations?)\b/i.test(blob);
-    if (design && !construction) rankScore *= 0.5;
-    if (construction) rankScore *= 1.2;
+  if (item.documentType === "legistar") rankScore += 1.5;
+  if (item.kind === "newspaper") {
+    const named = personName(question);
+    if (named && textMentionsPerson(named, `${item.filename}\n${item.title ?? ""}\n${item.text}`)) rankScore += 3;
+    if (/\b(?:budget|spending|levy|fund|reserves?)\b/i.test(question)) {
+      if (/\breserves?\b/i.test(item.text)) rankScore += 3;
+      if (/\$\s?\d/.test(item.text)) rankScore += 2;
+    }
   }
+  rankScore *= constructionRankMultiplier(question, item);
   return { ...item, tier, rankScore };
 }
 
@@ -569,24 +739,37 @@ export function formatEvidence(items: EvidenceItem[], question = ""): string {
     "If a person appears only as a candidate or an objector here, say the records may be incomplete and do not conclude they were not a village official.",
   ];
   if (news.length > 0) {
-    guidance.push("Integrate each relevant newspaper finding into the answer prose and cite its bracket number there. Do not leave a relevant newspaper finding unused. Do not append a stock line such as \"The Wednesday Journal reported:\" after the answer.");
+    guidance.push("Integrate each relevant newspaper finding into the answer prose and cite its bracket number there. Do not leave a relevant newspaper finding unused. A headline or URL with no article text is not a finding you must use. Do not append a stock line such as \"The Wednesday Journal reported:\" after the answer.");
     if (items.some((item) => item.kind !== "newspaper")) {
       guidance.push("When both an official source and a newspaper passage are relevant, cite both.");
     }
   }
   const name = personName(question);
   if (name) {
-    const required = news.filter((item) => newsEvidenceIsRelevant(question, evidenceSearchText(item)));
+    const required = news.filter((item) => articleNamesPerson(name, item.text));
     if (required.length > 0) {
       const markers = required.map((item) => `[${items.indexOf(item) + 1}]`).join(", ");
-      guidance.push(`This question asks who ${name} is. You must use every newspaper result that mentions ${name} (${markers}). State what that reporting says about ${name}, label it as reporting, and cite each of those numbers.`);
+      guidance.push(`This question asks who ${name} is. Newspaper coverage is required. You must use every newspaper result whose article text names ${name} (${markers}), including a last-name or nickname such as Bob. State what that reporting says about ${name}, label it as reporting, and cite each of those numbers. Do not say the text is missing for a passage that is present, and do not invent text for a headline that has none.`);
+    }
+  }
+  if (/\b(?:budget|spending|levy|fund|reserves?)\b/i.test(question)) {
+    const money = news.filter((item) => /\breserves?\b|\$\s?\d/i.test(`${item.title ?? ""}\n${item.text}`));
+    if (money.length > 0) {
+      const markers = money.map((item) => `[${items.indexOf(item) + 1}]`).join(", ");
+      guidance.push(`Newspaper findings ${markers} report a budget figure or a reserve draw that answers this question. State that finding, including the amount when one is given, and cite the marker. Do not leave it out of the answer in favor of the official records alone.`);
     }
   }
   if (isBoardRosterQuestion(question)) {
     guidance.push("When the question asks who the Village President or trustees are, cite the official Village Board page.");
   }
-  if (/\bovernight parking\b/i.test(question) && /\b(?:current|policy)\b/i.test(question)) {
+  if (/\bovernight parking\b/i.test(question) && /\b(?:current|policy|rules?)\b/i.test(question)) {
     guidance.push("For the current overnight parking policy, include 2023 and 2024 ordinance or Legistar changes that appear in the evidence, not only the current website summary.");
+  }
+  if (items.some((item) => item.documentType === "legistar")) {
+    guidance.push("A Legistar matter with status Passed or Adopted was adopted on its passed date. A First Reading is a proposal, not an adoption. When both appear, state the proposal and the later adoption separately. When you use a Legistar matter, write its file number, such as ORD 23-118 or MOT 24-142, in the sentence. Do not leave the file number only in the citation title.");
+  }
+  if (asksAboutConstruction(question)) {
+    guidance.push("For a contractor or vendor, prefer the passage that states the construction award, low bidder, or letting for the named project, including a budget-explanation document. Do not substitute a design or engineering consultant, or a different project on the same street.");
   }
   return [guidance.join(" "), ...lines].join("\n\n");
 }
@@ -596,33 +779,59 @@ export function formatEvidence(items: EvidenceItem[], question = ""): string {
  * they first appear. Every returned citation, including a record, gets that marker.
  * Stock newspaper lines with an empty or markdown body are removed first.
  */
+function citationIdentity(item: EvidenceItem): string {
+  if (item.kind === "record") {
+    const name = item.filename.trim().toLowerCase();
+    return name ? `record:${name}` : `record:${item.id}`;
+  }
+  return `${item.kind}:${citationUrl(item) ?? item.url ?? item.id}`;
+}
+
+/**
+ * Renumber inline [n] markers to the sources the answer actually uses.
+ * Passages from the same file share one citation. A trailing dump of markers
+ * and an empty "What I couldn't find." heading are removed first.
+ */
 export function alignCitations(answer: string, items: EvidenceItem[]): { answer: string; citations: ChatCitation[] } {
-  const cleaned = omitInvalidCitationLines(answer);
-  const order: number[] = [];
+  const cleaned = omitEmptyMissingSection(omitTrailingCitationDump(omitInvalidCitationLines(answer)));
+  const mentioned: number[] = [];
   const seen = new Set<number>();
-  const add = (number: number) => {
-    if (number < 1 || number > items.length || seen.has(number)) return;
+  for (const match of cleaned.matchAll(/\[(\d+)\]/g)) {
+    const number = Number(match[1]);
+    if (number < 1 || number > items.length || seen.has(number)) continue;
     seen.add(number);
-    order.push(number);
-  };
-  for (const match of cleaned.matchAll(/\[(\d+)\]/g)) add(Number(match[1]));
-  items.forEach((item, index) => {
-    const href = citationUrl(item);
-    if ((href && cleaned.includes(href)) || (item.url && cleaned.includes(item.url))) add(index + 1);
-    if (item.filename.length > 12 && cleaned.includes(item.filename)) add(index + 1);
-  });
-  const renumber = new Map(order.map((old, index) => [old, index + 1]));
-  const rewritten = cleaned.replace(/\[(\d+)\]/g, (full, raw: string) => {
-    const next = renumber.get(Number(raw));
-    return next ? `[${next}]` : full;
-  });
-  const citations = order.map((old, index) => citationForItem(items[old - 1], index + 1));
+    mentioned.push(number);
+  }
+  const identityNumber = new Map<string, number>();
+  const oldToNew = new Map<number, number>();
+  const citations: ChatCitation[] = [];
+  for (const old of mentioned) {
+    const item = items[old - 1];
+    const identity = citationIdentity(item);
+    let next = identityNumber.get(identity);
+    if (!next) {
+      next = citations.length + 1;
+      identityNumber.set(identity, next);
+      citations.push(citationForItem(item, next));
+    }
+    oldToNew.set(old, next);
+  }
+  const rewritten = cleaned
+    .replace(/\[(\d+)\]/g, (full, raw: string) => {
+      const next = oldToNew.get(Number(raw));
+      return next ? `[${next}]` : "";
+    })
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/ +([.,;:])/g, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   return { answer: rewritten, citations };
 }
 
 function citationUrl(item: EvidenceItem): string | undefined {
   const candidate = item.url || (item.id.startsWith("https://") ? item.id : "");
-  return candidate ? matchWebUrl(candidate)?.url : undefined;
+  if (!candidate) return undefined;
+  return matchWebUrl(candidate)?.url ?? matchWebUrl(candidate, [IDOT_LETTING_SOURCE])?.url;
 }
 
 function citationForItem(item: EvidenceItem, number: number): ChatCitation {
@@ -704,7 +913,8 @@ async function searchRecords(
     const rows = page && Array.isArray(page.data) ? page.data as SearchRow[] : [];
     for (const row of rows) {
       if (!row.file_id || excludedCitationFilename(row.filename ?? "")) continue;
-      const text = (row.content ?? []).map((part) => part.text ?? "").join("\n").trim().slice(0, 900);
+      const raw = (row.content ?? []).map((part) => part.text ?? "").join("\n");
+      const text = selectRecordExcerpt(raw, input.query, input.question);
       if (!text) continue;
       const attributes = row.attributes ?? undefined;
       const title = typeof attributes?.title === "string" ? attributes.title : undefined;
@@ -724,46 +934,161 @@ async function searchRecords(
   return items;
 }
 
+const RECORD_EXCERPT_LIMIT = 1_800;
+const EXCERPT_FOCUS = /\b(?:awarded|award|contract|bid|bidder|letting|IDOT|contractor)\b/i;
+
+function collapseWhitespace(text: string): string {
+  return text
+    .replace(/[ \t\u00A0\u2000-\u200A]+/g, " ")
+    .replace(/[ \t]*\n[ \t]*/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function passageTerms(query: string, question: string): string[] {
+  const words = `${query} ${question}`
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !STOP_WORDS.has(word));
+  return [...new Set(words)];
+}
+
+function splitPassage(text: string): string[] {
+  return text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function sentenceScore(sentence: string, terms: string[]): number {
+  const lower = sentence.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (lower.includes(term)) score += term.length > 5 ? 2 : 1;
+  }
+  if (EXCERPT_FOCUS.test(sentence)) score += 4;
+  if (/\$\s?[\d,]+/.test(sentence)) score += 2;
+  return score;
+}
+
+/**
+ * Keep the part of a record chunk that answers the query. Budget tables pad
+ * the front of a chunk with whitespace, so the award sentence can sit past a
+ * fixed prefix. Collapse that padding, then window around the best sentences.
+ * If the opening is the relevant part, it stays.
+ */
+export function selectRecordExcerpt(raw: string, query: string, question: string, limit = RECORD_EXCERPT_LIMIT): string {
+  const collapsed = collapseWhitespace(raw);
+  if (!collapsed) return "";
+  if (collapsed.length <= limit) return collapsed;
+  const sentences = splitPassage(collapsed);
+  const terms = passageTerms(query, question);
+  const scores = sentences.map((sentence) => sentenceScore(sentence, terms));
+  let best = 0;
+  for (let index = 1; index < scores.length; index += 1) {
+    if (scores[index] > scores[best]) best = index;
+  }
+  if ((scores[best] ?? 0) === 0) return collapsed.slice(0, limit);
+  let start = best;
+  let end = best;
+  let length = sentences[best]?.length ?? 0;
+  while (start > 0 || end < sentences.length - 1) {
+    const left = start > 0 ? (sentences[start - 1]?.length ?? 0) + 1 : Number.POSITIVE_INFINITY;
+    const right = end < sentences.length - 1 ? (sentences[end + 1]?.length ?? 0) + 1 : Number.POSITIVE_INFINITY;
+    if (left <= right && start > 0 && length + left <= limit) {
+      start -= 1;
+      length += left;
+      continue;
+    }
+    if (right < Number.POSITIVE_INFINITY && length + right <= limit) {
+      end += 1;
+      length += right;
+      continue;
+    }
+    break;
+  }
+  return sentences.slice(start, end + 1).join(" ").slice(0, limit);
+}
+
 function urlsInText(text: string): string[] {
   return [...text.matchAll(/https:\/\/[^\s<>"')\]]+/g)].map((match) => match[0].replace(/[.,;]+$/g, ""));
 }
 
-function webItemsFromResponse(
+function decodedUrlPath(url: string): string {
+  try { return decodeURIComponent(url).replace(/[-_/]+/g, " "); } catch { return url; }
+}
+
+function isIdotHost(url: string): boolean {
+  try { return /(^|\.)dot\.illinois\.gov$/i.test(new URL(url).hostname); } catch { return false; }
+}
+
+function pathOnlyExcerpt(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  const prose = trimmed.replace(/https?:\/\/\S+/g, " ").replace(/\s+/g, " ").trim();
+  return prose.length === 0;
+}
+
+export function webItemsFromResponse(
   response: OpenAI.Responses.Response,
   question: string,
   now: Date,
   fallbackKind: WebSourceKind,
+  sources?: WebSource[],
 ): { items: EvidenceItem[]; dropped: number; hosts: string[] } {
   const items: EvidenceItem[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, number>();
+  const pathOnlyIds = new Set<string>();
   let dropped = 0;
   const hosts: string[] = [];
   const add = (url: string, title: string, excerpt: string) => {
-    const matched = matchWebUrl(url);
+    const matched = sources ? matchWebUrl(url, sources) : matchWebUrl(url);
     let host = "";
     try { host = new URL(url).hostname; } catch { host = url.slice(0, 40); }
     if (!hosts.includes(host)) hosts.push(host);
-    const path = (() => {
-      try { return decodeURIComponent(url).replace(/[-_/]+/g, " "); } catch { return url; }
-    })();
-    const body = `${title}\n${excerpt}\n${path}`;
-    const relevant = matched?.kind === "newspaper"
-      ? newsEvidenceIsRelevant(question, body)
+    const path = decodedUrlPath(url);
+    const pathOnly = pathOnlyExcerpt(excerpt);
+    // Relevance uses the text we will store. Nearby model prose that is not
+    // stored must not make a path-only stub look like an article.
+    const stored = (pathOnly ? `${title}\n${path}` : excerpt).replace(/\s+/g, " ").trim().slice(0, 1_200);
+    const body = `${title}\n${stored}`;
+    const idot = Boolean(matched && (isIdotHost(matched.url) || isIdotHost(url)));
+    const relevant = !matched ? false
+      : idot ? idotEvidenceIsRelevant(question, body)
+      : matched.kind === "newspaper" ? newsEvidenceIsRelevant(question, body)
       : webResultIsRelevant(question, body);
     if (!matched || !relevant) {
       dropped += 1;
       return;
     }
-    if (seen.has(matched.url)) return;
-    seen.add(matched.url);
+    const prior = seen.get(matched.url);
+    if (prior !== undefined) {
+      const existing = items[prior];
+      if (existing && pathOnly === false && pathOnlyIds.has(matched.url)) {
+        pathOnlyIds.delete(matched.url);
+        items[prior] = scoreEvidence({
+          id: matched.url,
+          kind: matched.kind,
+          filename: title || existing.filename,
+          title: title || existing.title,
+          url: matched.url,
+          text: stored,
+          score: overlapScore(question, body) + 0.35,
+        }, question, now);
+      }
+      return;
+    }
+    seen.set(matched.url, items.length);
+    if (pathOnly) pathOnlyIds.add(matched.url);
     items.push(scoreEvidence({
       id: matched.url,
       kind: matched.kind,
       filename: title || matched.label,
       title: title || undefined,
       url: matched.url,
-      text: excerpt.slice(0, 900),
-      score: overlapScore(question, body),
+      text: stored,
+      score: overlapScore(question, body) + (pathOnly ? 0 : 0.35),
     }, question, now));
   };
   for (const item of response.output ?? []) {
@@ -784,7 +1109,11 @@ function webItemsFromResponse(
         const excerpt = text.slice(start, Math.max(annotation.end_index, start + 240)).trim() || text.slice(0, 900);
         add(annotation.url, annotation.title || "", excerpt);
       }
-      for (const url of urlsInText(text)) add(url, "", text.slice(0, 900));
+      for (const url of urlsInText(text)) {
+        const at = text.indexOf(url);
+        const quote = at < 0 ? text.slice(0, 900) : text.slice(Math.max(0, at - 500), Math.min(text.length, at + url.length + 240));
+        add(url, "", quote.replace(url, " ").trim() || quote);
+      }
       const textRelevant = fallbackKind === "newspaper"
         ? newsEvidenceIsRelevant(question, text)
         : webResultIsRelevant(question, text);
@@ -832,10 +1161,15 @@ async function runWebPass(
     requestId: string;
     domains?: string[];
     focus?: string;
+    sources?: WebSource[];
+    timeoutMs?: number;
+    retry?: boolean;
+    instructions?: string;
   },
 ): Promise<WebPassResult> {
   const domains = input.domains ?? (input.kind === "official" ? officialWebDomains(input.slug) : newspaperDomainsFor(input.slug));
   if (domains.length === 0) return { items: [], usage: null, ok: false };
+  const timeoutMs = input.timeoutMs ?? WEB_TIMEOUT_MS;
   const attempt = async () => {
     const response = await client.responses.create(
       {
@@ -843,9 +1177,9 @@ async function runWebPass(
         reasoning: { effort: "none" },
         max_output_tokens: 6_000,
         tool_choice: "required",
-        instructions: input.kind === "official"
+        instructions: input.instructions ?? (input.kind === "official"
           ? "Search only the allowed official municipal site. Quote short passages that are about the question, with page titles and full https URLs. Skip unrelated pages. Do not write the final answer. Do not conclude that a person was not an official."
-          : "Search only the allowed newspapers, including www.oakpark.com for the Wednesday Journal. Quote short passages that are about the question, with the article title, date, and full https URL. Skip unrelated articles. Call each passage newspaper reporting. Do not write the final answer.",
+          : "Search only the allowed newspapers, including www.oakpark.com for the Wednesday Journal. Quote short passages that are about the question, with the article title, date, and full https URL. Skip unrelated articles. Call each passage newspaper reporting. Do not write the final answer."),
         input: webQuery(input.question, input.kind, input.focus),
         include: ["web_search_call.action.sources"],
         tools: [{
@@ -855,10 +1189,10 @@ async function runWebPass(
           search_context_size: "low",
         }],
       },
-      { timeout: WEB_TIMEOUT_MS, signal: input.signal },
+      { timeout: timeoutMs, signal: input.signal },
     );
     logChatDiagnostics(input.requestId, response);
-    const extracted = webItemsFromResponse(response, input.question, input.now, input.kind);
+    const extracted = webItemsFromResponse(response, input.question, input.now, input.kind, input.sources);
     if (response.status === "incomplete" && extracted.items.length === 0) {
       throw Object.assign(new Error("web search output was cut off"), { name: "TimeoutError" });
     }
@@ -875,7 +1209,11 @@ async function runWebPass(
       console.error(`[${input.requestId}] ${input.kind} web search failed.`, error);
       return { items: [], usage: null, ok: false };
     }
-    console.info(`[${input.requestId}] ${input.kind} web search timed out after ${WEB_TIMEOUT_MS}ms. Retrying once.`);
+    if (input.retry === false) {
+      console.info(`[${input.requestId}] ${input.kind} web search timed out after ${timeoutMs}ms.`);
+      return { items: [], usage: null, ok: false };
+    }
+    console.info(`[${input.requestId}] ${input.kind} web search timed out after ${timeoutMs}ms. Retrying once.`);
     try {
       return await attempt();
     } catch (retryError) {
@@ -948,24 +1286,29 @@ export async function runResearchTurn(input: {
   const webOn = webPassEnabled(input.slug);
   const runOfficial = webOn && officialWebDomains(input.slug).length > 0;
   const runNews = webOn && newspaperDomainsFor(input.slug).length > 0;
-  const runLegistar = runOfficial && wantsLegistarPass(question) && officialWebDomains(input.slug).includes("oak-park.legistar.com");
-  if (runOfficial || runNews) input.onProgress?.("Searching the village website and newspapers…");
+  const legistarClient = legistarClientFor(input.slug);
+  const legistarOn = Boolean(legistarClient) && wantsLegistarLookup(question);
+  const runIdot = webOn && asksAboutConstruction(question);
+  if (runOfficial || runNews || legistarOn) input.onProgress?.("Searching the village website and newspapers…");
 
+  const emptyWeb = Promise.resolve({ items: [] as EvidenceItem[], usage: null, ok: false });
   const webPromise = (async () => {
     if (!webOn) return { items: [] as EvidenceItem[], officialOk: false, newsOk: false };
     const passes = await Promise.all([
-      runOfficial ? runWebPass(input.client, { ...input, question, kind: "official", now }) : Promise.resolve({ items: [], usage: null, ok: false }),
-      runNews ? runWebPass(input.client, { ...input, question, kind: "newspaper", now }) : Promise.resolve({ items: [], usage: null, ok: false }),
-      runLegistar ? runWebPass(input.client, {
+      runOfficial ? runWebPass(input.client, { ...input, question, kind: "official", now }) : emptyWeb,
+      runNews ? runWebPass(input.client, { ...input, question, kind: "newspaper", now }) : emptyWeb,
+      runIdot ? runWebPass(input.client, {
         ...input,
         question,
         kind: "official",
         now,
-        domains: ["oak-park.legistar.com"],
-        focus: /\bovernight parking\b/i.test(question)
-          ? "overnight parking ordinance 2023 2024 permit expansion"
-          : `${question} ordinance motion Legistar`,
-      }) : Promise.resolve({ items: [], usage: null, ok: false }),
+        domains: [IDOT_LETTING_SOURCE.domain],
+        sources: [IDOT_LETTING_SOURCE],
+        focus: `${projectPhrase(question)} construction contract awarded low bidder letting`,
+        timeoutMs: 8_000,
+        retry: false,
+        instructions: "Search only the allowed IDOT letting site. Quote the construction contract award, the low bidder, the letting number, and the amount for the named project. Skip design contracts and unrelated projects. Do not write the final answer.",
+      }) : emptyWeb,
     ]);
     for (const pass of passes) add(pass.usage);
     return {
@@ -973,6 +1316,55 @@ export async function runResearchTurn(input: {
       officialOk: passes[0].ok || passes[2].ok,
       newsOk: passes[1].ok,
     };
+  })();
+
+  const searchMatter = (matter: LegistarMatter) => {
+    const filters = matterDateFilter(matter);
+    return searchRecords(input.client, {
+      vectorStoreIds: input.vectorStoreIds,
+      query: legistarVectorQuery(matter),
+      ...(filters ? { filters } : {}),
+      question,
+      now,
+      signal: input.signal,
+    }).catch((error: unknown) => {
+      if (isAbort(error) && input.signal?.aborted) throw error;
+      console.error(`[${input.requestId}] Legistar record search failed.`, error);
+      return [] as EvidenceItem[];
+    });
+  };
+
+  const legistarItem = (matter: LegistarMatter): EvidenceItem => scoreEvidence({
+    id: matter.url,
+    kind: "official",
+    filename: `${matter.file}: ${matter.title}`.slice(0, 140),
+    title: matter.title,
+    url: matter.url,
+    text: describeLegistarMatter(matter),
+    recordDate: matterRecordStamp(matter),
+    documentType: "legistar",
+    score: 2.6,
+  }, question, now);
+
+  // The API call and the date-bounded record search overlap the planner and the first record wave.
+  const legistarPromise = (async () => {
+    if (!legistarOn || !legistarClient) return { matters: [] as LegistarMatter[], items: [] as EvidenceItem[], calls: 0 };
+    let matters: LegistarMatter[] = [];
+    try {
+      matters = await queryLegistarMatters({
+        clientName: legistarClient,
+        question,
+        now,
+        signal: input.signal,
+      });
+    } catch (error) {
+      if (isAbort(error) && input.signal?.aborted) throw error;
+      console.error(`[${input.requestId}] Legistar lookup failed.`, error);
+    }
+    console.info(`[${input.requestId}] legistar ${matters.map((matter) => matter.file).join(", ") || "none"}`);
+    const picked = legistarSearchMatters(question, matters);
+    const groups = await Promise.all(picked.map((matter) => searchMatter(matter)));
+    return { matters, items: groups.flat(), calls: picked.length };
   })();
 
   input.onProgress?.("Planning record searches…");
@@ -989,7 +1381,7 @@ export async function runResearchTurn(input: {
   const cutoff = recencyCutoff(question, now);
 
   input.onProgress?.("Searching municipal records…");
-  const recordGroups = await Promise.all([
+  const recordPromise = Promise.all([
     ...queries.map((query) => searchRecords(input.client, {
       vectorStoreIds: input.vectorStoreIds,
       query,
@@ -1014,12 +1406,47 @@ export async function runResearchTurn(input: {
       return [] as EvidenceItem[];
     })] : []),
   ]);
-  const web = await webPromise;
+  const [recordGroups, web, legistar] = await Promise.all([recordPromise, webPromise, legistarPromise]);
   const boardPage = boardRosterEvidence(input.slug, question, now);
-  let evidence = mergeEvidence([...recordGroups.flat(), ...web.items, ...(boardPage ? [boardPage] : [])]);
-  const gaps = missingPartQueries(question, evidence.map((item) => item.text).join("\n"));
-  const idFollowUps = legislativeResolutionQueries(evidence);
+  let evidence = mergeEvidence([
+    ...recordGroups.flat(),
+    ...web.items,
+    ...legistar.matters.map(legistarItem),
+    ...legistar.items,
+    ...(boardPage ? [boardPage] : []),
+  ]);
+  const knownFiles = new Set(legistar.matters.map((matter) => matter.file.toUpperCase()));
   let followUpCalls = 0;
+  if (legistarClient) {
+    const mentioned = legistarFileNumbers(evidence.map((item) => `${item.filename}\n${item.title ?? ""}\n${item.text}`).join("\n"))
+      .filter((file) => !knownFiles.has(file.toUpperCase()))
+      .slice(0, 3);
+    if (mentioned.length > 0 && remaining() > 12_000) {
+      try {
+        const extraMatters = await queryLegistarMatters({
+          clientName: legistarClient,
+          question,
+          now,
+          signal: input.signal,
+          onlyFiles: mentioned,
+        });
+        const fresh = extraMatters.filter((matter) => !knownFiles.has(matter.file.toUpperCase()));
+        if (fresh.length > 0) {
+          console.info(`[${input.requestId}] legistar files ${fresh.map((matter) => matter.file).join(", ")}`);
+          const groups = await Promise.all(fresh.slice(0, 2).map((matter) => searchMatter(matter)));
+          followUpCalls += Math.min(fresh.length, 2);
+          for (const matter of fresh) knownFiles.add(matter.file.toUpperCase());
+          evidence = mergeEvidence([...evidence, ...fresh.map(legistarItem), ...groups.flat()]);
+        }
+      } catch (error) {
+        if (isAbort(error) && input.signal?.aborted) throw error;
+        console.error(`[${input.requestId}] Legistar file lookup failed.`, error);
+      }
+    }
+  }
+  const gatheredText = evidence.map((item) => item.text).join("\n");
+  const gaps = missingPartQueries(question, gatheredText);
+  const idFollowUps = legislativeResolutionQueries(evidence).filter((item) => !knownFiles.has(item.id.toUpperCase()));
   if ((gaps.length > 0 || idFollowUps.length > 0) && remaining() > 20_000) {
     input.onProgress?.("Searching for the missing part…");
     console.info(`[${input.requestId}] follow-up searches ${JSON.stringify([...gaps, ...idFollowUps.map((item) => item.query)])}`);
@@ -1066,23 +1493,19 @@ export async function runResearchTurn(input: {
       console.error(`[${input.requestId}] Legislative follow-up failed.`, error);
       return [] as EvidenceItem[];
     })));
-    followUpCalls = extra.length + descriptionGroups.length + datedGroups.length;
+    followUpCalls += extra.length + descriptionGroups.length + datedGroups.length;
     evidence = mergeEvidence([...evidence, ...extra.flat(), ...descriptionGroups.flat(), ...datedGroups.flat()]);
-    if (webOn && remaining() > 25_000) {
+    if (webOn && gaps.length > 0 && runNews && remaining() > 25_000) {
       const focus = gaps.slice(0, 3).join(". ");
-      const extraWeb = await Promise.all([
-        runNews ? runWebPass(input.client, { ...input, question, kind: "newspaper", now, focus }) : Promise.resolve({ items: [], usage: null, ok: false }),
-        (runLegistar || runOfficial) ? runWebPass(input.client, { ...input, question, kind: "official", now, domains: ["oak-park.legistar.com"], focus }) : Promise.resolve({ items: [], usage: null, ok: false }),
-      ]);
-      for (const pass of extraWeb) add(pass.usage);
-      if (extraWeb[0].ok) web.newsOk = true;
-      if (extraWeb[1].ok) web.officialOk = true;
-      evidence = mergeEvidence([...evidence, ...extraWeb.flatMap((pass) => pass.items)]);
+      const extraNews = await runWebPass(input.client, { ...input, question, kind: "newspaper", now, focus });
+      add(extraNews.usage);
+      if (extraNews.ok) web.newsOk = true;
+      evidence = mergeEvidence([...evidence, ...extraNews.items]);
     }
   }
   usage = {
     ...usage,
-    fileSearchCalls: usage.fileSearchCalls + (recordGroups.length + followUpCalls) * Math.max(1, input.vectorStoreIds.length),
+    fileSearchCalls: usage.fileSearchCalls + (recordGroups.length + legistar.calls + followUpCalls) * Math.max(1, input.vectorStoreIds.length),
   };
   usage = { ...usage, estimatedCostMicrousd: estimateCostMicrousd(usage, input.model) };
 
