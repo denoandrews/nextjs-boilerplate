@@ -65,12 +65,25 @@ export function legistarFileNumbers(text: string): string[] {
   return [...found.values()];
 }
 
+const ACTION_ACTOR = /\b(?:village|board|council|trustees)\b/i;
+const ACTION_MONTH = /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\b/i;
+
+/**
+ * Legislative questions, file numbers, and village/board actions.
+ * A dated action such as "what did the village do in April 2024" counts.
+ * A budget-trend question that only says "changed" does not, so that turn stays on the record search.
+ */
 export function wantsLegistarLookup(question: string): boolean {
   const text = cleanQuestion(question);
   if (!text) return false;
   if (legistarFileNumbers(text).length > 0) return true;
   if (asksAboutLegislation(text)) return true;
-  return /\bwhat did the (?:village )?(?:board|council|trustees)\b/i.test(text);
+  if (/\bwhat did the (?:village|board|council|trustees)\b/i.test(text)) return true;
+  if (/\bdid (?:the )?(?:village|board|council|they) (?:approve|adopt|pass|do|change|expand)\b/i.test(text)) return true;
+  if (/\b(?:new rule|expand(?:ed|ing)?|expansion)\b/i.test(text) && ACTION_ACTOR.test(text)) return true;
+  const dated = ACTION_MONTH.test(text) || /\b20\d{2}\b/.test(text);
+  const action = /\b(?:do|did|approve|approved|change|changed|expand|expanded|adopt|adopted)\b/i.test(text);
+  return dated && action && ACTION_ACTOR.test(text);
 }
 
 function placeKeyword(question: string): string | null {

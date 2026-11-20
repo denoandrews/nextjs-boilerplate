@@ -97,6 +97,12 @@ describe("Legistar lookup", () => {
     expect(wantsLegistarLookup("[TEST] What are the current overnight parking rules?")).toBe(true);
     expect(wantsLegistarLookup("Who was the Lake Street streetscape construction contractor?")).toBe(false);
     expect(wantsLegistarLookup("What did the board adopt for the budget?")).toBe(true);
+    expect(wantsLegistarLookup("What did the village do in April 2024 about overnight parking?")).toBe(true);
+    expect(wantsLegistarLookup("Did they approve the overnight parking expansion?")).toBe(true);
+    expect(wantsLegistarLookup("How has the village budget changed over the last three years?")).toBe(false);
+    const april = legistarFilters("What did the village do in April 2024 about overnight parking?", NOW);
+    expect(april.some((filter) => filter.includes("substringof('overnight',MatterTitle)"))).toBe(true);
+    expect(april.some((filter) => filter.includes("datetime'2024-01-01'"))).toBe(true);
     expect(legistarKeywords(OVERNIGHT)).toEqual(["overnight", "parking"]);
     expect(legistarFileNumbers("See Ord. 23-118 and MOT 24-142 and Ordinance 23-118.")).toEqual(["ORD 23-118", "MOT 24-142"]);
     const filters = legistarFilters(OVERNIGHT, NOW);

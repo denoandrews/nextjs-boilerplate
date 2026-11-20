@@ -300,14 +300,17 @@ export function legislativeQueryVariants(question: string): string[] {
 export function contractorQueries(question: string): string[] {
   if (!asksAboutConstruction(question)) return [];
   const topic = projectPhrase(question);
+  // These searches stay unfiltered. The award often lives in a budget-explanation
+  // file whose document_type is ordinance or budget, not a construction contract.
+  const project = /streetscape/i.test(topic) ? topic : `${topic} streetscape`;
   return [
+    `${project} contract awarded IDOT bid`,
+    `${topic} Section awarded to`,
     `${topic} contract awarded`,
     `${topic} construction contract awarded`,
     `${topic} construction contractor bid award`,
     `${topic} awarded to`,
     `${topic} low bidder`,
-    `${topic} construction contract`,
-    `${topic} letting`,
     `${topic} budget explanation`,
     `${topic} IDOT letting`,
   ];
@@ -463,10 +466,7 @@ export function significantTerms(text: string): string[] {
 export function webResultIsRelevant(question: string, text: string): boolean {
   const haystack = text.toLowerCase();
   const name = personName(question);
-  if (name) {
-    const surname = personSurname(name);
-    if (surname && !haystack.includes(surname)) return false;
-  }
+  if (name && !textMentionsPerson(name, haystack)) return false;
   const terms = significantTerms(question);
   if (terms.length === 0) return haystack.trim().length > 40;
   return terms.some((term) => haystack.includes(term));
@@ -506,9 +506,70 @@ export function placeEntities(question: string): string[] {
   return [...new Set(entities)];
 }
 
-function personSurname(name: string): string | null {
-  const parts = name.toLowerCase().split(/\s+/).filter((part) => part.length > 2);
-  return parts[parts.length - 1] ?? null;
+const GIVEN_NAME_NICKNAMES: Record<string, string[]> = {
+  robert: ["bob", "rob", "bobby", "robbie"],
+  william: ["bill", "will", "billy", "liam"],
+  james: ["jim", "jimmy"],
+  richard: ["rick", "dick", "rich"],
+  michael: ["mike"],
+  thomas: ["tom", "tommy"],
+  charles: ["charlie", "chuck"],
+  joseph: ["joe"],
+  elizabeth: ["liz", "beth", "betty"],
+  katherine: ["kate", "kathy", "katie"],
+  catherine: ["cathy", "kate", "katie"],
+  daniel: ["dan", "danny"],
+  david: ["dave"],
+  anthony: ["tony"],
+  christopher: ["chris"],
+  stephen: ["steve"],
+  steven: ["steve"],
+  edward: ["ed", "eddie", "ted"],
+  theodore: ["ted", "theo"],
+  nicholas: ["nick"],
+  benjamin: ["ben"],
+  samuel: ["sam"],
+  alexander: ["alex"],
+  andrew: ["andy"],
+  john: ["jack"],
+  patricia: ["pat", "patty"],
+};
+
+/** Surname, plus a short form of the given name such as Bob for Robert. */
+export function personNameVariants(name: string): string[] {
+  const parts = name.toLowerCase().replace(/[.’']/g, "").split(/\s+/).filter((part) => part.length > 1 && !part.endsWith("."));
+  const variants = new Set<string>();
+  const surname = parts[parts.length - 1];
+  const given = parts[0];
+  if (surname && surname.length > 2) variants.add(surname);
+  if (given && given.length > 2) {
+    for (const nickname of GIVEN_NAME_NICKNAMES[given] ?? []) variants.add(nickname);
+  }
+  return [...variants];
+}
+
+export function textMentionsPerson(name: string, text: string): boolean {
+  const haystack = normalizeOverlapText(text);
+  return personNameVariants(name).some((variant) => {
+    if (variant.length <= 3) return new RegExp(`\\b${variant}\\b`).test(haystack);
+    return haystack.includes(variant);
+  });
+}
+
+/**
+ * A who-is search hit is often only the article URL. Wednesday Journal slugs
+ * such as "villager-of-the-year" do not repeat the person's name.
+ */
+function isLinkOnlyNewspaperHit(text: string): boolean {
+  if (!/https:\/\/[^\s]*?(?:oakpark\.com|chicagotribune\.com)/i.test(text)) return false;
+  const withoutUrls = text.replace(/https?:\/\/\S+/gi, " ");
+  // A written sentence is an article excerpt. A bare search hit is only the URL and its slug.
+  if (/[A-Za-z][.!?](?:\s|$)/.test(withoutUrls)) return false;
+  const words = withoutUrls
+    .replace(/[^a-z0-9\s]/gi, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 2 && !/^(?:www|com|http|https|oakpark|chicagotribune)$/i.test(word));
+  return words.length <= 16;
 }
 
 /**
@@ -517,15 +578,32 @@ function personSurname(name: string): string | null {
  * A person question keeps a hit only when it names that person.
  */
 export function newsEvidenceIsRelevant(question: string, text: string): boolean {
-  const haystack = normalizeOverlapText(text);
   const name = personName(question);
   if (name) {
-    const surname = personSurname(name);
-    return Boolean(surname && haystack.includes(surname));
+    if (textMentionsPerson(name, text)) return true;
+    return isLinkOnlyNewspaperHit(text);
   }
   const entities = placeEntities(question);
-  if (entities.length > 0) return entities.some((entity) => haystack.includes(entity));
+  if (entities.length > 0) return entities.some((entity) => normalizeOverlapText(text).includes(entity));
   return webResultIsRelevant(question, text);
+}
+
+/**
+ * IDOT letting hits are often bare result URLs. Keep a hit when it names the
+ * street, the streetscape, a section award, or a letting. A URL that shares
+ * none of those words is not evidence of the contractor.
+ */
+export function idotEvidenceIsRelevant(question: string, text: string): boolean {
+  const body = text.toLowerCase();
+  const places = placeEntities(question);
+  const streetHit = places.some((place) => body.includes(place) || body.includes(place.split(" ")[0] ?? ""));
+  const projectHit = /\bstreetscape\b/i.test(question) && /\bstreetscape\b/.test(body);
+  const awardHit = /\b(?:awarded(?:\s+to)?|low bidder|lettings?|bidder)\b/i.test(text);
+  const sectionHit = /\bsection\b/i.test(text) && /\b\d{2}-\d{4,}/.test(text);
+  if (sectionHit && (streetHit || projectHit || awardHit)) return true;
+  if ((streetHit || projectHit) && (awardHit || /\bcontract\b/.test(body))) return true;
+  if (streetHit && projectHit) return true;
+  return false;
 }
 
 export function evidenceSearchText(item: EvidenceItem): string {
@@ -600,6 +678,14 @@ export function scoreEvidence(item: Omit<EvidenceItem, "tier" | "rankScore">, qu
   let rankScore = item.score * boost * (item.kind === "record" ? typeBoost(item.documentType) : 1);
   if (isBoardRosterQuestion(question) && /village-board/i.test(item.url ?? "")) rankScore += 5;
   if (item.documentType === "legistar") rankScore += 1.5;
+  if (item.kind === "newspaper") {
+    const named = personName(question);
+    if (named && textMentionsPerson(named, `${item.filename}\n${item.title ?? ""}\n${item.text}`)) rankScore += 3;
+    if (/\b(?:budget|spending|levy|fund|reserves?)\b/i.test(question)) {
+      if (/\breserves?\b/i.test(item.text)) rankScore += 3;
+      if (/\$\s?\d/.test(item.text)) rankScore += 2;
+    }
+  }
   rankScore *= constructionRankMultiplier(question, item);
   return { ...item, tier, rankScore };
 }
@@ -650,7 +736,14 @@ export function formatEvidence(items: EvidenceItem[], question = ""): string {
     const required = news.filter((item) => newsEvidenceIsRelevant(question, evidenceSearchText(item)));
     if (required.length > 0) {
       const markers = required.map((item) => `[${items.indexOf(item) + 1}]`).join(", ");
-      guidance.push(`This question asks who ${name} is. You must use every newspaper result that mentions ${name} (${markers}). State what that reporting says about ${name}, label it as reporting, and cite each of those numbers.`);
+      guidance.push(`This question asks who ${name} is. Newspaper coverage is required. You must use every newspaper result that mentions ${name} (${markers}), including a last-name or nickname such as Bob. State what that reporting says about ${name}, including an award or office named in the headline, label it as reporting, and cite each of those numbers.`);
+    }
+  }
+  if (/\b(?:budget|spending|levy|fund|reserves?)\b/i.test(question)) {
+    const money = news.filter((item) => /\breserves?\b|\$\s?\d/i.test(`${item.title ?? ""}\n${item.text}`));
+    if (money.length > 0) {
+      const markers = money.map((item) => `[${items.indexOf(item) + 1}]`).join(", ");
+      guidance.push(`Newspaper findings ${markers} report a budget figure or a reserve draw that answers this question. State that finding, including the amount when one is given, and cite the marker. Do not leave it out of the answer in favor of the official records alone.`);
     }
   }
   if (isBoardRosterQuestion(question)) {
@@ -660,7 +753,7 @@ export function formatEvidence(items: EvidenceItem[], question = ""): string {
     guidance.push("For the current overnight parking policy, include 2023 and 2024 ordinance or Legistar changes that appear in the evidence, not only the current website summary.");
   }
   if (items.some((item) => item.documentType === "legistar")) {
-    guidance.push("A Legistar matter with status Passed or Adopted was adopted on its passed date. A First Reading is a proposal, not an adoption. When both appear, state the proposal and the later adoption separately.");
+    guidance.push("A Legistar matter with status Passed or Adopted was adopted on its passed date. A First Reading is a proposal, not an adoption. When both appear, state the proposal and the later adoption separately. When you use a Legistar matter, write its file number, such as ORD 23-118 or MOT 24-142, in the sentence. Do not leave the file number only in the citation title.");
   }
   if (asksAboutConstruction(question)) {
     guidance.push("For a contractor or vendor, prefer the passage that states the construction award, low bidder, or letting for the named project, including a budget-explanation document. Do not substitute a design or engineering consultant, or a different project on the same street.");
@@ -831,6 +924,20 @@ function urlsInText(text: string): string[] {
   return [...text.matchAll(/https:\/\/[^\s<>"')\]]+/g)].map((match) => match[0].replace(/[.,;]+$/g, ""));
 }
 
+function decodedUrlPath(url: string): string {
+  try { return decodeURIComponent(url).replace(/[-_/]+/g, " "); } catch { return url; }
+}
+
+function isIdotHost(url: string): boolean {
+  try { return /(^|\.)dot\.illinois\.gov$/i.test(new URL(url).hostname); } catch { return false; }
+}
+
+function nearbyText(text: string, url: string): string {
+  const at = text.indexOf(url);
+  if (at < 0) return "";
+  return text.slice(Math.max(0, at - 500), Math.min(text.length, at + url.length + 500));
+}
+
 function webItemsFromResponse(
   response: OpenAI.Responses.Response,
   question: string,
@@ -842,17 +949,26 @@ function webItemsFromResponse(
   const seen = new Set<string>();
   let dropped = 0;
   const hosts: string[] = [];
+  const passages: string[] = [];
+  for (const item of response.output ?? []) {
+    if (item.type !== "message") continue;
+    for (const content of item.content) {
+      if (content.type === "output_text" && content.text.trim()) passages.push(content.text.trim());
+    }
+  }
+  const fullText = passages.join("\n\n");
   const add = (url: string, title: string, excerpt: string) => {
     const matched = sources ? matchWebUrl(url, sources) : matchWebUrl(url);
     let host = "";
     try { host = new URL(url).hostname; } catch { host = url.slice(0, 40); }
     if (!hosts.includes(host)) hosts.push(host);
-    const path = (() => {
-      try { return decodeURIComponent(url).replace(/[-_/]+/g, " "); } catch { return url; }
-    })();
-    const body = `${title}\n${excerpt}\n${path}`;
-    const relevant = matched?.kind === "newspaper"
-      ? newsEvidenceIsRelevant(question, body)
+    const path = decodedUrlPath(url);
+    const around = nearbyText(fullText, url);
+    const body = `${title}\n${excerpt}\n${path}\n${around}`;
+    const idot = Boolean(matched && (isIdotHost(matched.url) || isIdotHost(url)));
+    const relevant = !matched ? false
+      : idot ? idotEvidenceIsRelevant(question, body)
+      : matched.kind === "newspaper" ? newsEvidenceIsRelevant(question, body)
       : webResultIsRelevant(question, body);
     if (!matched || !relevant) {
       dropped += 1;
@@ -860,13 +976,14 @@ function webItemsFromResponse(
     }
     if (seen.has(matched.url)) return;
     seen.add(matched.url);
+    const quote = excerpt.startsWith("http") ? `${title}\n${path}`.trim() : excerpt;
     items.push(scoreEvidence({
       id: matched.url,
       kind: matched.kind,
       filename: title || matched.label,
       title: title || undefined,
       url: matched.url,
-      text: excerpt.slice(0, 900),
+      text: (quote || path).slice(0, 900),
       score: overlapScore(question, body),
     }, question, now));
   };
@@ -888,7 +1005,7 @@ function webItemsFromResponse(
         const excerpt = text.slice(start, Math.max(annotation.end_index, start + 240)).trim() || text.slice(0, 900);
         add(annotation.url, annotation.title || "", excerpt);
       }
-      for (const url of urlsInText(text)) add(url, "", text.slice(0, 900));
+      for (const url of urlsInText(text)) add(url, "", nearbyText(text, url) || text.slice(0, 900));
       const textRelevant = fallbackKind === "newspaper"
         ? newsEvidenceIsRelevant(question, text)
         : webResultIsRelevant(question, text);

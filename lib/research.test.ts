@@ -8,6 +8,7 @@ import {
   draftResearchQueries,
   filterNewsEvidence,
   formatEvidence,
+  idotEvidenceIsRelevant,
   legislativeIdQueries,
   legislativeIds,
   legislativeQueryVariants,
@@ -166,6 +167,8 @@ describe("research queries", () => {
     expect(queries).toContain("awarded to");
     expect(queries).toContain("budget explanation");
     expect(queries).toContain("IDOT letting");
+    expect(queries).toContain("contract awarded IDOT bid");
+    expect(queries).toContain("Section awarded to");
     expect(contractorQueries("What is the village population?")).toEqual([]);
     expect(draftResearchQueries(question, NOW).some((query) => /IDOT letting/i.test(query))).toBe(true);
     const design = scoreEvidence({
@@ -200,6 +203,11 @@ describe("research queries", () => {
     expect(streetscape.rankScore).toBeGreaterThan(sewer.rankScore);
     expect(streetscape.rankScore).toBeGreaterThan(design.rankScore);
     expect(contractorQueries(question).join(" ")).toContain("low bidder");
+    expect(idotEvidenceIsRelevant(question, "https://webapps1.dot.illinois.gov/WCP/Letting/128-61F36")).toBe(false);
+    expect(idotEvidenceIsRelevant(
+      question,
+      "IDOT awarded the Lake Street streetscape, Section 16-00264-00-PV, to R.W. Duntemann Co.",
+    )).toBe(true);
   });
 
   it("uses one citation per file and drops an empty missing-section heading", () => {
@@ -302,6 +310,8 @@ describe("web evidence", () => {
     expect(newsEvidenceIsRelevant(budget, "Wednesday Journal: the village drew on budget reserves to close the gap.")).toBe(true);
     expect(newsEvidenceIsRelevant(budget, "The Percy Julian streetscape opens Saturday.")).toBe(false);
     expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "Wednesday Journal profile of Milstein.")).toBe(true);
+    expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "Bob was named Villager of the Year.")).toBe(true);
+    expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "https://www.oakpark.com/2003/12/31/villager-of-the-year/")).toBe(true);
     expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "A page about water bills and parking permits.")).toBe(false);
 
     const reserves = item({
@@ -337,6 +347,7 @@ describe("web evidence", () => {
     expect(budgetPrompt).toContain("https://www.oakpark.com/reserves");
     expect(budgetPrompt).not.toContain("utm_source");
     expect(budgetPrompt).toContain("Integrate each relevant newspaper finding into the answer prose");
+    expect(budgetPrompt).toContain("budget figure or a reserve draw");
     expect(budgetPrompt).toContain("cite both");
     expect(budgetPrompt).not.toContain("Percy Julian");
 
