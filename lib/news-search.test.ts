@@ -125,6 +125,9 @@ describe("Oak Park newspaper search", () => {
     expect(result.answer).toBe("Place carts out by 7 a.m.\n\nThe rest of this answer was cut off. Ask a follow-up if you need more.");
     expect(closeTruncatedAnswer("La ordenanza evita el escurrimiento", true)).toContain("se cortó");
     expect(presentAnswer("Overnight parking ends at 6 a.m.\n\nWhat I couldn't find", false)).toBe("Overnight parking ends at 6 a.m.");
+    expect(presentAnswer("The budget grew.\n\nWhat I couldn't find.", false)).toBe("The budget grew.");
+    expect(presentAnswer("The budget grew.\n\n**What I couldn't find.**\n\n[2] [3]", false)).toBe("The budget grew.");
+    expect(presentAnswer("The budget grew.\n\nWhat I couldn't find.\n\nThe 2020 levy was not retrieved.", false)).toContain("2020 levy");
     expect(presentAnswer("Overnight parking ends at 6 a.m.\n\nWhat I couldn't find", true)).toContain("cut off");
     expect(citationLineBodyIsUsable("* list a specific pickup day.")).toBe(false);
     expect(citationLineBodyIsUsable("")).toBe(false);

@@ -135,7 +135,7 @@ function clippedNote(answer: string) {
     : "The rest of this answer was cut off. Ask a follow-up if you need more.";
 }
 
-const DANGLING_HEADING = /(?:\n|^)\s*(?:#{1,3}\s*)?(?:What I couldn't find|Lo que no pude encontrar)\s*:?\s*$/i;
+const MISSING_HEADING = /(?:^|\n)\s*(?:#{1,3}\s*)?(?:\*\*|__)?(?:What I couldn't find|Lo que no pude encontrar)\s*[.:]?(?:\*\*|__)?\s*[.:]?(?=\s*(?:\n|$))/gi;
 const STOCK_CITATION_LINE = /^(?:The Wednesday Journal|The Chicago Tribune)\s+reported:\s*([\s\S]*)$/i;
 
 /**
@@ -166,9 +166,52 @@ export function omitInvalidCitationLines(answer: string): string {
     .trim();
 }
 
-/** Drop a heading that has no following text, then close an answer the model did not finish. */
+/** A sources line, or a line that is only bracket citations, is not part of the answer. */
+export function omitTrailingCitationDump(answer: string): string {
+  const lines = answer.split("\n");
+  while (lines.length > 0) {
+    const line = lines[lines.length - 1]?.trim() ?? "";
+    if (!line) {
+      lines.pop();
+      continue;
+    }
+    if (/^(?:\[\d+\][ \t,;]*)+$/.test(line)) {
+      lines.pop();
+      continue;
+    }
+    if (/^(?:sources?|citations?)\s*:?\s*$/i.test(line)) {
+      lines.pop();
+      continue;
+    }
+    break;
+  }
+  return lines.join("\n").trim();
+}
+
+/**
+ * Drop a trailing "What I couldn't find." heading when nothing follows it.
+ * A period, colon, or bold markers still count as empty. A heading that names
+ * a missing fact stays.
+ */
+export function omitEmptyMissingSection(answer: string): string {
+  const matches = [...answer.matchAll(MISSING_HEADING)];
+  const last = matches[matches.length - 1];
+  if (!last || last.index === undefined) return answer;
+  const rest = answer.slice(last.index + last[0].length);
+  const substantive = rest
+    .replace(/\[\d+\]/g, " ")
+    .replace(/\b(?:sources?|citations?)\b[:.]?/gi, " ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[-*#>_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (substantive.length > 0) return answer;
+  return answer.slice(0, last.index).trim();
+}
+
+/** Drop an empty missing-section heading and unused trailing citations, then close a cut-off answer. */
 export function presentAnswer(answer: string, incomplete: boolean): string {
-  const stripped = omitInvalidCitationLines(answer.trim().replace(DANGLING_HEADING, "").trim());
+  const stripped = omitEmptyMissingSection(omitTrailingCitationDump(omitInvalidCitationLines(answer.trim())));
   if (!incomplete) return stripped;
   return closeTruncatedAnswer(stripped, true);
 }

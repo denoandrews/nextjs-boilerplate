@@ -183,6 +183,44 @@ describe("research queries", () => {
       score: 0.6,
     }, question, NOW);
     expect(build.rankScore).toBeGreaterThan(design.rankScore);
+    const sewer = scoreEvidence({
+      id: "sewer",
+      kind: "record",
+      filename: "sewer-award.pdf",
+      text: "The Lake Street sewer contract was awarded to Trine Construction, the low bidder.",
+      score: 0.9,
+    }, question, NOW);
+    const streetscape = scoreEvidence({
+      id: "streetscape",
+      kind: "record",
+      filename: "2021-03-15_VillageBoard__08_Ordinance_Amendment_Detailed_Bud_Explanations.pdf",
+      text: "IDOT awarded the Lake Street streetscape construction contract to R.W. Duntemann Co. for $10,557,783.",
+      score: 0.55,
+    }, question, NOW);
+    expect(streetscape.rankScore).toBeGreaterThan(sewer.rankScore);
+    expect(streetscape.rankScore).toBeGreaterThan(design.rankScore);
+    expect(contractorQueries(question).join(" ")).toContain("low bidder");
+  });
+
+  it("uses one citation per file and drops an empty missing-section heading", () => {
+    const budget = [
+      item({ id: "file-budget", kind: "record", filename: "fy26-budget-book.pdf", text: "FY2024 spending.", score: 0.8 }),
+      item({ id: "file-budget-chunk", kind: "record", filename: "fy26-budget-book.pdf", text: "FY2026 spending rose.", score: 0.7 }),
+      item({
+        id: "https://www.oakpark.com/budget",
+        kind: "newspaper",
+        filename: "Wednesday Journal",
+        url: "https://www.oakpark.com/budget",
+        text: "The village drew on reserves.",
+        score: 0.4,
+      }),
+    ];
+    const aligned = alignCitations("FY2024 spending. [1] FY2026 spending. [2]\n\nWhat I couldn't find.\n\n[3]", budget);
+    expect(aligned.answer).toBe("FY2024 spending. [1] FY2026 spending. [1]");
+    expect(aligned.citations.map((citation) => citation.fileId)).toEqual(["file-budget"]);
+    const named = alignCitations("FY2024 spending. [1]\n\nWhat I couldn't find.\n\nThe 2020 levy was not in the packet.", budget);
+    expect(named.answer).toContain("What I couldn't find");
+    expect(named.answer).toContain("2020 levy");
   });
 });
 

@@ -16,6 +16,13 @@ export type WebSource = {
   label: string;
 };
 
+/** IDOT lettings are searched only for a construction-award question, not on every turn. */
+export const IDOT_LETTING_SOURCE: WebSource = {
+  domain: "webapps1.dot.illinois.gov",
+  kind: "official",
+  label: "IDOT",
+};
+
 const MUNICIPAL_WEB_SOURCES: Record<string, WebSource[]> = {
   "oak-park-il": [
     { domain: "oakpark.com", kind: "newspaper", label: "Wednesday Journal" },
@@ -128,5 +135,5 @@ export function matchWebUrl(value: string, sources: WebSource[] = Object.values(
 
 export function webCitationKind(value: string | null | undefined): WebSourceKind | null {
   if (!value) return null;
-  return matchWebUrl(value)?.kind ?? null;
+  return matchWebUrl(value)?.kind ?? matchWebUrl(value, [IDOT_LETTING_SOURCE])?.kind ?? null;
 }

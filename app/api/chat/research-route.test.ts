@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   create: vi.fn(),
@@ -48,14 +48,29 @@ function callKind(body: { tools?: { type?: string }[]; instructions?: string }) 
   return "answer";
 }
 
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json([])));
+});
+
 afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 describe("research mode", () => {
   it("searches records, the village website, and newspapers in parallel for every Oak Park question", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-only");
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json([{
+      MatterId: 8520,
+      MatterGuid: "D6F507E1-FCC1-476B-9F65-CC50D7408515",
+      MatterFile: "MOT 24-142",
+      MatterTitle: "A Motion to Expand Overnight On-Street Permit Parking in Zones Y1 and Y2",
+      MatterTypeName: "Motion",
+      MatterStatusName: "Passed",
+      MatterIntroDate: "2024-03-18T00:00:00",
+      MatterPassedDate: "2024-04-11T00:00:00",
+    }])));
     mocks.config.mockResolvedValue(OAK);
     mocks.search.mockImplementation(async (_id: string, params: { query?: string }) => {
       const query = String(params.query);
@@ -86,6 +101,10 @@ describe("research mode", () => {
       expect(evidence.indexOf("ORD 24-124")).toBeLessThan(evidence.indexOf("February 2021 ordinance"));
       expect(evidence.indexOf("December 2023")).toBeGreaterThan(-1);
       expect(evidence.indexOf("source: official website")).toBeLessThan(evidence.indexOf("source: newspaper reporting"));
+      expect(evidence).toContain("MOT 24-142");
+      expect(evidence).toContain("adopted this motion on 2024-04-11");
+      expect(evidence).toContain("https://oak-park.legistar.com/LegislationDetail.aspx?ID=8520");
+      expect(evidence).toContain("First Reading is a proposal, not an adoption");
       return textResponse("The 2024 ordinance changed overnight parking. [1]");
     });
 
@@ -102,7 +121,13 @@ describe("research mode", () => {
     const domainSets = webCalls.map((call) => (call.tools[0].filters.allowed_domains as string[]).slice().sort().join("|"));
     expect(domainSets).toContain(["chicagotribune.com", "oakpark.com", "www.chicagotribune.com", "www.oakpark.com"].sort().join("|"));
     expect(domainSets).toContain(["oak-park.legistar.com", "oak-park.us", "www.oak-park.us"].sort().join("|"));
-    expect(domainSets).toContain("oak-park.legistar.com");
+    expect(domainSets).not.toContain("oak-park.legistar.com");
+    const legistarUrls = vi.mocked(fetch).mock.calls.map((call) => String(call[0]));
+    expect(legistarUrls.some((url) => url.includes("webapi.legistar.com/v1/oak-park/matters"))).toBe(true);
+    expect(mocks.search.mock.calls.some((call) => {
+      const filters = call[1]?.filters as { filters?: { key?: string }[] } | undefined;
+      return filters?.filters?.some((filter) => filter.key === "record_date");
+    })).toBe(true);
     expect(mocks.search.mock.calls.length).toBeGreaterThan(2);
   });
 

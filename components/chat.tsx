@@ -286,7 +286,7 @@ export function Chat({ municipalitySlug, compact = false }: { municipalitySlug?:
                       const meetings = citationSourceNote(href, municipalitySlug);
                       const sourceLabel = kind === "newspaper" ? labels.news : kind === "official" ? labels.official : labels.document;
                       return (
-                        <li key={citation.fileId}>
+                        <li key={`${citation.marker ?? ""}-${citation.fileId}-${citation.filename}`}>
                           <span>{sourceLabel}: </span>
                           {href ? <a href={href} title={meetings ? labels.meetingsPageTitle : undefined} target="_blank" rel="noopener noreferrer">{citation.filename}</a> : citation.filename}
                           {meetings ? <span className="source-note"> ({labels.meetingsPage})</span> : null}
