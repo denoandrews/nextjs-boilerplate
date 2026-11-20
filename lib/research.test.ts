@@ -9,6 +9,9 @@ import {
   filterNewsEvidence,
   formatEvidence,
   idotEvidenceIsRelevant,
+  constructionAwardCovered,
+  selectRecordExcerpt,
+  webItemsFromResponse,
   legislativeIdQueries,
   legislativeIds,
   legislativeQueryVariants,
@@ -84,6 +87,15 @@ describe("research queries", () => {
     expect(missingPartQueries(
       "who was the contractor?",
       "The construction contract was awarded to R.W. Duntemann Co.",
+    )).toEqual([]);
+    expect(constructionAwardCovered("Thomas Engineering Group, LLC amended the design contract.")).toBe(false);
+    expect(missingPartQueries(
+      "Who was the Lake Street streetscape construction contractor?",
+      "Thomas Engineering Group, LLC amended the design contract.",
+    ).some((query) => /IDOT bid|Section awarded/i.test(query))).toBe(true);
+    expect(missingPartQueries(
+      "Who was the contractor?",
+      "IDOT bid and awarded a construction contract to R.W. Duntemann Co. in the amount of $10,557,783 in early 2020.",
     )).toEqual([]);
     const parkingGaps = missingPartQueries(
       "What is the current overnight parking policy?",
@@ -208,6 +220,37 @@ describe("research queries", () => {
       question,
       "IDOT awarded the Lake Street streetscape, Section 16-00264-00-PV, to R.W. Duntemann Co.",
     )).toBe(true);
+    const padding = Array.from({ length: 30 }, (_, index) => `Account ${index}${" ".repeat(50)}${index * 1000}`).join("\n");
+    const award = "IDOT bid and awarded a construction contract to R.W. Duntemann Co. in the amount of $10,557,783 in early 2020.";
+    const tail = Array.from({ length: 30 }, (_, index) => `Budget line ${index} continues with more figures and accounts.`).join(" ");
+    const excerpt = selectRecordExcerpt(`${padding}\n${award}\n${tail}`, "Lake Street streetscape contract awarded IDOT bid", question);
+    expect(excerpt).toContain("R.W. Duntemann Co.");
+    expect(excerpt).toContain("$10,557,783");
+    expect(excerpt).not.toMatch(/ {10}/);
+    expect(excerpt.length).toBeLessThanOrEqual(1_800);
+    expect(selectRecordExcerpt("The opening sentence is the award to R.W. Duntemann Co.", "awarded", question)).toContain("opening sentence");
+  });
+
+  it("keeps a quoted web excerpt instead of a path-only stub for the same URL", () => {
+    const url = "https://www.oak-park.us/Government/Leadership/Village-Board";
+    const quote = `Robert Milstein served as trustee from 2003-2005 and from 2005-2007. ${url}`;
+    const extracted = webItemsFromResponse({
+      output: [
+        { type: "web_search_call", action: { type: "search", sources: [{ type: "url", url }] } },
+        {
+          type: "message",
+          content: [{
+            type: "output_text",
+            text: quote,
+            annotations: [{ type: "url_citation", url, title: "Village Board", start_index: 0, end_index: 72 }],
+          }],
+        },
+      ],
+    } as never, "Who is Robert Milstein?", NOW, "official");
+    expect(extracted.items).toHaveLength(1);
+    expect(extracted.items[0]?.text).toContain("2003-2005");
+    expect(extracted.items[0]?.text).toContain("2005-2007");
+    expect(extracted.items[0]?.text).not.toMatch(/^https:\/\//);
   });
 
   it("uses one citation per file and drops an empty missing-section heading", () => {
@@ -311,7 +354,7 @@ describe("web evidence", () => {
     expect(newsEvidenceIsRelevant(budget, "The Percy Julian streetscape opens Saturday.")).toBe(false);
     expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "Wednesday Journal profile of Milstein.")).toBe(true);
     expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "Bob was named Villager of the Year.")).toBe(true);
-    expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "https://www.oakpark.com/2003/12/31/villager-of-the-year/")).toBe(true);
+    expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "https://www.oakpark.com/2003/12/31/villager-of-the-year/")).toBe(false);
     expect(newsEvidenceIsRelevant("Who is Robert Milstein?", "A page about water bills and parking permits.")).toBe(false);
 
     const reserves = item({
@@ -385,7 +428,20 @@ describe("web evidence", () => {
     ]);
     expect(kept).toHaveLength(1);
     const prompt = formatEvidence(kept, question);
-    expect(prompt).toContain("You must use every newspaper result that mentions Robert Milstein ([1])");
+    expect(prompt).toContain("You must use every newspaper result whose article text names Robert Milstein ([1])");
+    const headlineOnly = formatEvidence([
+      item({
+        id: "https://www.oakpark.com/2003/12/31/villager-of-the-year/",
+        kind: "newspaper",
+        filename: "Villager of the Year",
+        url: "https://www.oakpark.com/2003/12/31/villager-of-the-year/",
+        text: "villager of the year",
+        score: 0.4,
+      }),
+      kept[0],
+    ], question);
+    expect(headlineOnly).toContain("whose article text names Robert Milstein ([2])");
+    expect(headlineOnly).not.toContain("whose article text names Robert Milstein ([1], [2])");
     expect(prompt).toContain("https://www.oakpark.com/milstein");
     expect(prompt).not.toContain("utm_source");
     const aligned = alignCitations(

@@ -135,7 +135,8 @@ function clippedNote(answer: string) {
     : "The rest of this answer was cut off. Ask a follow-up if you need more.";
 }
 
-const MISSING_HEADING = /(?:^|\n)\s*(?:#{1,3}\s*)?(?:\*\*|__)?(?:What I couldn't find|Lo que no pude encontrar)\s*[.:]?(?:\*\*|__)?\s*[.:]?(?=\s*(?:\n|$))/gi;
+const MISSING_HEADING_LINE = /^[\s#*_]*what i couldn['’]t find[\s#*_.:\-]*$/i;
+const SPANISH_MISSING_HEADING_LINE = /^[\s#*_]*lo que no pude encontrar[\s#*_.:\-]*$/i;
 const STOCK_CITATION_LINE = /^(?:The Wednesday Journal|The Chicago Tribune)\s+reported:\s*([\s\S]*)$/i;
 
 /**
@@ -193,20 +194,27 @@ export function omitTrailingCitationDump(answer: string): string {
  * A period, colon, or bold markers still count as empty. A heading that names
  * a missing fact stays.
  */
+function missingHeadingLine(line: string): boolean {
+  const stripped = line.replace(/(?:\s*\[\d+\])+\s*$/g, "").trim();
+  return MISSING_HEADING_LINE.test(stripped) || SPANISH_MISSING_HEADING_LINE.test(stripped);
+}
+
 export function omitEmptyMissingSection(answer: string): string {
-  const matches = [...answer.matchAll(MISSING_HEADING)];
-  const last = matches[matches.length - 1];
-  if (!last || last.index === undefined) return answer;
-  const rest = answer.slice(last.index + last[0].length);
-  const substantive = rest
+  const lines = answer.split("\n");
+  let heading = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (missingHeadingLine(lines[index] ?? "")) heading = index;
+  }
+  if (heading < 0) return answer;
+  const substantive = lines.slice(heading + 1).join("\n")
     .replace(/\[\d+\]/g, " ")
-    .replace(/\b(?:sources?|citations?)\b[:.]?/gi, " ")
+    .replace(/\b(?:sources?|citations?|none|nothing|n\/a)\b[:.]?/gi, " ")
     .replace(/https?:\/\/\S+/g, " ")
-    .replace(/[-*#>_]+/g, " ")
+    .replace(/[^A-Za-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (substantive.length > 0) return answer;
-  return answer.slice(0, last.index).trim();
+  return lines.slice(0, heading).join("\n").trim();
 }
 
 /** Drop an empty missing-section heading and unused trailing citations, then close a cut-off answer. */

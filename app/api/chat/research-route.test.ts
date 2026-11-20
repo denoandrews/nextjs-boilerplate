@@ -227,7 +227,7 @@ describe("research mode", () => {
       }
       const evidence = JSON.stringify(body.input);
       expect(evidence).not.toContain("former Village Trustee");
-      expect(evidence).toContain("You must use every newspaper result that mentions Robert Milstein");
+      expect(evidence).toContain("You must use every newspaper result whose article text names Robert Milstein");
       return textResponse("The retrieved records may be incomplete.");
     });
     const response = await POST(request("Who is Robert Milstein?"));

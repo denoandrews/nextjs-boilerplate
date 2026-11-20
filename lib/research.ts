@@ -316,14 +316,31 @@ export function contractorQueries(question: string): string[] {
   ];
 }
 
+const AWARD_NEAR_COMPANY = /\b(?:awarded(?:\s+(?:a|the)\s+(?:construction\s+)?contract)?(?:\s+to)?|construction contract|low bidder|lettings?|bid and awarded)\b/i;
+const COMPANY_NAME = /\b[A-Z][A-Za-z&'.-]+(?:\s+[A-Z][A-Za-z&'.-]+){0,4}\s(?:Co\.|Inc\.|LLC|Corp\.|Company)\b/g;
+
+/**
+ * A design consultant's Inc. or LLC is not the construction award.
+ * The award counts only when award or construction language sits next to the company.
+ */
+export function constructionAwardCovered(evidenceText: string): boolean {
+  if (/\bawarded(?:\s+(?:a|the)\s+construction\s+contract)?\s+to\s+[A-Z]/i.test(evidenceText)) return true;
+  for (const match of evidenceText.matchAll(COMPANY_NAME)) {
+    const at = match.index ?? 0;
+    const window = evidenceText.slice(Math.max(0, at - 140), Math.min(evidenceText.length, at + match[0].length + 40));
+    if (AWARD_NEAR_COMPANY.test(window)) return true;
+  }
+  return false;
+}
+
 /** Parts the merged evidence still does not answer, with a targeted follow-up query for each. */
 export function missingPartQueries(question: string, evidenceText: string): string[] {
   const text = stripHarnessPrefix(question);
   const topic = topicPhrase(text);
-  const checks: { when: RegExp; covered: RegExp; queries: string[] }[] = [
+  const checks: { when: RegExp; covered: RegExp | ((evidence: string) => boolean); queries: string[] }[] = [
     {
       when: CONSTRUCTION_QUESTION,
-      covered: /\bawarded to\s+[A-Z]|\b(?:Co\.|Inc\.|LLC|Corp\.)\b/,
+      covered: constructionAwardCovered,
       queries: contractorQueries(text),
     },
     {
@@ -353,7 +370,8 @@ export function missingPartQueries(question: string, evidenceText: string): stri
   }
   const queries: string[] = [];
   for (const check of checks) {
-    if (!check.when.test(text) || check.covered.test(evidenceText)) continue;
+    const covered = typeof check.covered === "function" ? check.covered(evidenceText) : check.covered.test(evidenceText);
+    if (!check.when.test(text) || covered) continue;
     queries.push(...check.queries);
   }
   // File numbers already answered by a Legistar matter should not open another search wave.
@@ -556,20 +574,14 @@ export function textMentionsPerson(name: string, text: string): boolean {
   });
 }
 
-/**
- * A who-is search hit is often only the article URL. Wednesday Journal slugs
- * such as "villager-of-the-year" do not repeat the person's name.
- */
-function isLinkOnlyNewspaperHit(text: string): boolean {
-  if (!/https:\/\/[^\s]*?(?:oakpark\.com|chicagotribune\.com)/i.test(text)) return false;
-  const withoutUrls = text.replace(/https?:\/\/\S+/gi, " ");
-  // A written sentence is an article excerpt. A bare search hit is only the URL and its slug.
-  if (/[A-Za-z][.!?](?:\s|$)/.test(withoutUrls)) return false;
-  const words = withoutUrls
-    .replace(/[^a-z0-9\s]/gi, " ")
-    .split(/\s+/)
-    .filter((word) => word.length > 2 && !/^(?:www|com|http|https|oakpark|chicagotribune)$/i.test(word));
-  return words.length <= 16;
+function hasSentence(text: string): boolean {
+  return /[A-Za-z0-9][.!?](?:\s|$)/.test(text.replace(/https?:\/\/\S+/g, " "));
+}
+
+/** Article prose that names the person. A URL or headline slug does not count. */
+function articleNamesPerson(name: string, text: string): boolean {
+  const prose = text.replace(/https?:\/\/\S+/g, " ");
+  return hasSentence(prose) && textMentionsPerson(name, prose);
 }
 
 /**
@@ -580,8 +592,9 @@ function isLinkOnlyNewspaperHit(text: string): boolean {
 export function newsEvidenceIsRelevant(question: string, text: string): boolean {
   const name = personName(question);
   if (name) {
-    if (textMentionsPerson(name, text)) return true;
-    return isLinkOnlyNewspaperHit(text);
+    // A headline slug or bare URL is not coverage. The excerpt itself has to name the person.
+    const prose = text.replace(/https?:\/\/\S+/g, " ");
+    return textMentionsPerson(name, prose);
   }
   const entities = placeEntities(question);
   if (entities.length > 0) return entities.some((entity) => normalizeOverlapText(text).includes(entity));
@@ -726,17 +739,17 @@ export function formatEvidence(items: EvidenceItem[], question = ""): string {
     "If a person appears only as a candidate or an objector here, say the records may be incomplete and do not conclude they were not a village official.",
   ];
   if (news.length > 0) {
-    guidance.push("Integrate each relevant newspaper finding into the answer prose and cite its bracket number there. Do not leave a relevant newspaper finding unused. Do not append a stock line such as \"The Wednesday Journal reported:\" after the answer.");
+    guidance.push("Integrate each relevant newspaper finding into the answer prose and cite its bracket number there. Do not leave a relevant newspaper finding unused. A headline or URL with no article text is not a finding you must use. Do not append a stock line such as \"The Wednesday Journal reported:\" after the answer.");
     if (items.some((item) => item.kind !== "newspaper")) {
       guidance.push("When both an official source and a newspaper passage are relevant, cite both.");
     }
   }
   const name = personName(question);
   if (name) {
-    const required = news.filter((item) => newsEvidenceIsRelevant(question, evidenceSearchText(item)));
+    const required = news.filter((item) => articleNamesPerson(name, item.text));
     if (required.length > 0) {
       const markers = required.map((item) => `[${items.indexOf(item) + 1}]`).join(", ");
-      guidance.push(`This question asks who ${name} is. Newspaper coverage is required. You must use every newspaper result that mentions ${name} (${markers}), including a last-name or nickname such as Bob. State what that reporting says about ${name}, including an award or office named in the headline, label it as reporting, and cite each of those numbers.`);
+      guidance.push(`This question asks who ${name} is. Newspaper coverage is required. You must use every newspaper result whose article text names ${name} (${markers}), including a last-name or nickname such as Bob. State what that reporting says about ${name}, label it as reporting, and cite each of those numbers. Do not say the text is missing for a passage that is present, and do not invent text for a headline that has none.`);
     }
   }
   if (/\b(?:budget|spending|levy|fund|reserves?)\b/i.test(question)) {
@@ -900,7 +913,8 @@ async function searchRecords(
     const rows = page && Array.isArray(page.data) ? page.data as SearchRow[] : [];
     for (const row of rows) {
       if (!row.file_id || excludedCitationFilename(row.filename ?? "")) continue;
-      const text = (row.content ?? []).map((part) => part.text ?? "").join("\n").trim().slice(0, 900);
+      const raw = (row.content ?? []).map((part) => part.text ?? "").join("\n");
+      const text = selectRecordExcerpt(raw, input.query, input.question);
       if (!text) continue;
       const attributes = row.attributes ?? undefined;
       const title = typeof attributes?.title === "string" ? attributes.title : undefined;
@@ -920,6 +934,83 @@ async function searchRecords(
   return items;
 }
 
+const RECORD_EXCERPT_LIMIT = 1_800;
+const EXCERPT_FOCUS = /\b(?:awarded|award|contract|bid|bidder|letting|IDOT|contractor)\b/i;
+
+function collapseWhitespace(text: string): string {
+  return text
+    .replace(/[ \t\u00A0\u2000-\u200A]+/g, " ")
+    .replace(/[ \t]*\n[ \t]*/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function passageTerms(query: string, question: string): string[] {
+  const words = `${query} ${question}`
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !STOP_WORDS.has(word));
+  return [...new Set(words)];
+}
+
+function splitPassage(text: string): string[] {
+  return text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function sentenceScore(sentence: string, terms: string[]): number {
+  const lower = sentence.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (lower.includes(term)) score += term.length > 5 ? 2 : 1;
+  }
+  if (EXCERPT_FOCUS.test(sentence)) score += 4;
+  if (/\$\s?[\d,]+/.test(sentence)) score += 2;
+  return score;
+}
+
+/**
+ * Keep the part of a record chunk that answers the query. Budget tables pad
+ * the front of a chunk with whitespace, so the award sentence can sit past a
+ * fixed prefix. Collapse that padding, then window around the best sentences.
+ * If the opening is the relevant part, it stays.
+ */
+export function selectRecordExcerpt(raw: string, query: string, question: string, limit = RECORD_EXCERPT_LIMIT): string {
+  const collapsed = collapseWhitespace(raw);
+  if (!collapsed) return "";
+  if (collapsed.length <= limit) return collapsed;
+  const sentences = splitPassage(collapsed);
+  const terms = passageTerms(query, question);
+  const scores = sentences.map((sentence) => sentenceScore(sentence, terms));
+  let best = 0;
+  for (let index = 1; index < scores.length; index += 1) {
+    if (scores[index] > scores[best]) best = index;
+  }
+  if ((scores[best] ?? 0) === 0) return collapsed.slice(0, limit);
+  let start = best;
+  let end = best;
+  let length = sentences[best]?.length ?? 0;
+  while (start > 0 || end < sentences.length - 1) {
+    const left = start > 0 ? (sentences[start - 1]?.length ?? 0) + 1 : Number.POSITIVE_INFINITY;
+    const right = end < sentences.length - 1 ? (sentences[end + 1]?.length ?? 0) + 1 : Number.POSITIVE_INFINITY;
+    if (left <= right && start > 0 && length + left <= limit) {
+      start -= 1;
+      length += left;
+      continue;
+    }
+    if (right < Number.POSITIVE_INFINITY && length + right <= limit) {
+      end += 1;
+      length += right;
+      continue;
+    }
+    break;
+  }
+  return sentences.slice(start, end + 1).join(" ").slice(0, limit);
+}
+
 function urlsInText(text: string): string[] {
   return [...text.matchAll(/https:\/\/[^\s<>"')\]]+/g)].map((match) => match[0].replace(/[.,;]+$/g, ""));
 }
@@ -932,13 +1023,14 @@ function isIdotHost(url: string): boolean {
   try { return /(^|\.)dot\.illinois\.gov$/i.test(new URL(url).hostname); } catch { return false; }
 }
 
-function nearbyText(text: string, url: string): string {
-  const at = text.indexOf(url);
-  if (at < 0) return "";
-  return text.slice(Math.max(0, at - 500), Math.min(text.length, at + url.length + 500));
+function pathOnlyExcerpt(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  const prose = trimmed.replace(/https?:\/\/\S+/g, " ").replace(/\s+/g, " ").trim();
+  return prose.length === 0;
 }
 
-function webItemsFromResponse(
+export function webItemsFromResponse(
   response: OpenAI.Responses.Response,
   question: string,
   now: Date,
@@ -946,25 +1038,21 @@ function webItemsFromResponse(
   sources?: WebSource[],
 ): { items: EvidenceItem[]; dropped: number; hosts: string[] } {
   const items: EvidenceItem[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, number>();
+  const pathOnlyIds = new Set<string>();
   let dropped = 0;
   const hosts: string[] = [];
-  const passages: string[] = [];
-  for (const item of response.output ?? []) {
-    if (item.type !== "message") continue;
-    for (const content of item.content) {
-      if (content.type === "output_text" && content.text.trim()) passages.push(content.text.trim());
-    }
-  }
-  const fullText = passages.join("\n\n");
   const add = (url: string, title: string, excerpt: string) => {
     const matched = sources ? matchWebUrl(url, sources) : matchWebUrl(url);
     let host = "";
     try { host = new URL(url).hostname; } catch { host = url.slice(0, 40); }
     if (!hosts.includes(host)) hosts.push(host);
     const path = decodedUrlPath(url);
-    const around = nearbyText(fullText, url);
-    const body = `${title}\n${excerpt}\n${path}\n${around}`;
+    const pathOnly = pathOnlyExcerpt(excerpt);
+    // Relevance uses the text we will store. Nearby model prose that is not
+    // stored must not make a path-only stub look like an article.
+    const stored = (pathOnly ? `${title}\n${path}` : excerpt).replace(/\s+/g, " ").trim().slice(0, 1_200);
+    const body = `${title}\n${stored}`;
     const idot = Boolean(matched && (isIdotHost(matched.url) || isIdotHost(url)));
     const relevant = !matched ? false
       : idot ? idotEvidenceIsRelevant(question, body)
@@ -974,17 +1062,33 @@ function webItemsFromResponse(
       dropped += 1;
       return;
     }
-    if (seen.has(matched.url)) return;
-    seen.add(matched.url);
-    const quote = excerpt.startsWith("http") ? `${title}\n${path}`.trim() : excerpt;
+    const prior = seen.get(matched.url);
+    if (prior !== undefined) {
+      const existing = items[prior];
+      if (existing && pathOnly === false && pathOnlyIds.has(matched.url)) {
+        pathOnlyIds.delete(matched.url);
+        items[prior] = scoreEvidence({
+          id: matched.url,
+          kind: matched.kind,
+          filename: title || existing.filename,
+          title: title || existing.title,
+          url: matched.url,
+          text: stored,
+          score: overlapScore(question, body) + 0.35,
+        }, question, now);
+      }
+      return;
+    }
+    seen.set(matched.url, items.length);
+    if (pathOnly) pathOnlyIds.add(matched.url);
     items.push(scoreEvidence({
       id: matched.url,
       kind: matched.kind,
       filename: title || matched.label,
       title: title || undefined,
       url: matched.url,
-      text: (quote || path).slice(0, 900),
-      score: overlapScore(question, body),
+      text: stored,
+      score: overlapScore(question, body) + (pathOnly ? 0 : 0.35),
     }, question, now));
   };
   for (const item of response.output ?? []) {
@@ -1005,7 +1109,11 @@ function webItemsFromResponse(
         const excerpt = text.slice(start, Math.max(annotation.end_index, start + 240)).trim() || text.slice(0, 900);
         add(annotation.url, annotation.title || "", excerpt);
       }
-      for (const url of urlsInText(text)) add(url, "", nearbyText(text, url) || text.slice(0, 900));
+      for (const url of urlsInText(text)) {
+        const at = text.indexOf(url);
+        const quote = at < 0 ? text.slice(0, 900) : text.slice(Math.max(0, at - 500), Math.min(text.length, at + url.length + 240));
+        add(url, "", quote.replace(url, " ").trim() || quote);
+      }
       const textRelevant = fallbackKind === "newspaper"
         ? newsEvidenceIsRelevant(question, text)
         : webResultIsRelevant(question, text);
